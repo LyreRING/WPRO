@@ -1,0 +1,357 @@
+"""Workflow-Progress and Residency-Aware A2C (WPR-A2C).
+
+This version fixes the earlier critical issue where the actor only saw a
+state-level scalar shared by all actions. The actor now scores each candidate
+assignment with an action feature vector phi(S, a), and the policy-gradient
+update uses the correct softmax-linear gradient:
+
+    grad log pi(a|S) = phi(S,a) - sum_a' pi(a'|S) phi(S,a').
+
+代码中保留中文注释，方便后续整理到论文和组会材料。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from dag_a2c.wpr_env import STAGE_TYPES, WPREnv
+
+
+WAIT_SLOT = -1
+WAIT_STAGE = -1
+WAIT_MODEL = -1
+
+
+def softmax(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+    z = logits.astype(np.float64) / max(temperature, 1e-6)
+    z -= float(np.max(z))
+    p = np.exp(z)
+    return p / max(float(np.sum(p)), 1e-12)
+
+
+@dataclass
+class WPRA2CConfig:
+    actor_lr: float = 0.004
+    critic_lr: float = 0.010
+    demand_lr: float = 0.006
+    entropy_coef: float = 0.001
+    beta_time_discount: float = 0.035
+    eta_residency: float = 1.2
+    prep_lambda: float = 0.38
+    wait_bias: float = -0.35
+    temperature: float = 0.90
+    seed: int = 0
+    use_progress_encoder: bool = True
+    use_demand_predictor: bool = True
+    use_residency_scorer: bool = True
+    use_time_critic: bool = True
+    allow_wait: bool = True
+
+
+class WorkflowProgressEncoder:
+    """模块 1：Permutation-invariant workflow/GPU progress encoder.
+
+    旧实现直接 flatten active workflow slots。workflow 完成后 slot 会移动，导致同一
+    位置语义不稳定。这里改为 DeepSets 风格的池化表示：
+    - workflow feature mean / max / normalized sum；
+    - GPU residency feature mean / max；
+    - global event state。
+    """
+
+    def encode(self, env: WPREnv, use_progress: bool = True) -> np.ndarray:
+        obs = env.observe()
+        wf = obs["workflow_features"].copy()
+        if not use_progress:
+            wf[:] = 0.0
+        active = wf[:, 0] > 0.0
+        if np.any(active):
+            wf_active = wf[active]
+            wf_mean = np.mean(wf_active, axis=0)
+            wf_max = np.max(wf_active, axis=0)
+            wf_sum = np.sum(wf_active, axis=0) / max(1.0, float(env.max_active))
+        else:
+            wf_mean = np.zeros(wf.shape[1], dtype=np.float32)
+            wf_max = np.zeros(wf.shape[1], dtype=np.float32)
+            wf_sum = np.zeros(wf.shape[1], dtype=np.float32)
+
+        gpu = obs["residency"]
+        gpu_mean = np.mean(gpu, axis=0)
+        gpu_max = np.max(gpu, axis=0)
+        count = np.asarray([np.sum(active) / max(1, env.max_active)], dtype=np.float32)
+        return np.concatenate([wf_mean, wf_max, wf_sum, gpu_mean, gpu_max, obs["global"], count]).astype(np.float32)
+
+
+class FutureModelDemandPredictor:
+    """模块 2：Future Model-Demand Predictor.
+
+    为避免“预测函数与梯度不匹配”，这里使用线性输出 + MSE，梯度严格对应
+    pred = state @ W + b。用于 scorer 时再做 clip，训练本身不经过 softplus/max norm。
+    """
+
+    def __init__(self, state_dim: int, num_models: int, rng: np.random.Generator) -> None:
+        self.W = rng.normal(0.0, 0.015, size=(state_dim, num_models)).astype(np.float32)
+        self.b = np.zeros(num_models, dtype=np.float32)
+
+    def predict_raw(self, state: np.ndarray) -> np.ndarray:
+        return (state @ self.W + self.b).astype(np.float32)
+
+    def predict(self, state: np.ndarray) -> np.ndarray:
+        return np.clip(self.predict_raw(state), 0.0, 1.5)
+
+    def update(self, state: np.ndarray, target: np.ndarray, lr: float) -> float:
+        pred = self.predict_raw(state)
+        err = pred - target
+        self.W -= lr * np.outer(state, err)
+        self.b -= lr * err
+        return float(np.mean(err**2))
+
+
+class TimeAwareCritic:
+    """模块 5：Time-aware critic with pooled state features."""
+
+    def __init__(self, state_dim: int) -> None:
+        self.w = np.zeros(state_dim, dtype=np.float32)
+        self.b = 0.0
+
+    def value(self, state: np.ndarray) -> float:
+        return float(state @ self.w + self.b)
+
+    def update(self, state: np.ndarray, target: float, lr: float) -> float:
+        value = self.value(state)
+        advantage = float(np.clip(target - value, -10.0, 10.0))
+        self.w += lr * advantage * state
+        self.b += lr * advantage
+        return advantage
+
+
+class WPRA2CAgent:
+    """WPR-A2C 主体。
+
+    Actor 参数作用在 action feature 上，而不是只作用在 state 上。
+    """
+
+    def __init__(self, env: WPREnv, config: WPRA2CConfig) -> None:
+        self.config = config
+        self.rng = np.random.default_rng(config.seed)
+        self.encoder = WorkflowProgressEncoder()
+        state_dim = len(self.encode(env))
+        self.demand = FutureModelDemandPredictor(state_dim, env.num_models, self.rng)
+        self.critic = TimeAwareCritic(state_dim)
+        self.action_dim = len(self.action_features(env, self.encode(env), np.zeros(env.num_models, dtype=np.float32), (WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, 0)))
+        self.actor_w = self.rng.normal(0.0, 0.025, size=self.action_dim).astype(np.float32)
+        self.actor_b = 0.0
+
+    def encode(self, env: WPREnv) -> np.ndarray:
+        return self.encoder.encode(env, use_progress=self.config.use_progress_encoder)
+
+    def predict_demand(self, state: np.ndarray, env: WPREnv) -> np.ndarray:
+        if self.config.use_demand_predictor:
+            return self.demand.predict(state)
+        return np.zeros(env.num_models, dtype=np.float32)
+
+    def dispatch(self, env: WPREnv, deterministic: bool = False) -> tuple[list[tuple[int, int, int, int]], list[dict]]:
+        """模块 4：Event-aware autoregressive matching decoder.
+
+        对每个 idle GPU 按固定顺序选择动作。候选集合现在包含 WAIT_g：
+        - dispatch action: (workflow_slot, stage_id, model_id, gpu_id)
+        - wait action:     (-1, -1, -1, gpu_id)
+        """
+
+        state = self.encode(env)
+        demand = self.predict_demand(state, env)
+        demand_target = env.oracle_dag_demand_target()
+        assignments: list[tuple[int, int, int, int]] = []
+        records: list[dict] = []
+        used_pairs: set[tuple[int, int]] = set()
+
+        for gpu_id in sorted(env.idle_gpus()):
+            candidates = env.feasible_actions_for_gpu(gpu_id, used_pairs)
+            if self.config.allow_wait and env.has_future_external_event():
+                candidates = candidates + [(WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, gpu_id)]
+            if not candidates:
+                continue
+            features = np.asarray([self.action_features(env, state, demand, a) for a in candidates], dtype=np.float32)
+            logits = features @ self.actor_w + self.actor_b
+            if self.config.use_residency_scorer:
+                logits = logits + np.asarray([self.residency_delta(env, demand, a) for a in candidates], dtype=np.float32) * self.config.eta_residency
+            logits = logits + np.asarray([self.config.wait_bias if a[0] < 0 else 0.0 for a in candidates], dtype=np.float32)
+            probs = softmax(logits, self.config.temperature)
+            idx = int(np.argmax(logits)) if deterministic else int(self.rng.choice(len(candidates), p=probs))
+            action = candidates[idx]
+            records.append(
+                {
+                    "state": state,
+                    "demand_target": demand_target,
+                    "action": action,
+                    "candidates": candidates,
+                    "features": features,
+                    "probs": probs,
+                    "logits": logits,
+                }
+            )
+            if action[0] >= 0:
+                assignments.append(action)
+                used_pairs.add((action[0], action[1]))
+            else:
+                assignments.append(action)
+        return assignments, records
+
+    def action_features(self, env: WPREnv, state: np.ndarray, demand: np.ndarray, action: tuple[int, int, int, int]) -> np.ndarray:
+        """构造 phi(S,a)：每个候选动作都有不同特征，actor 才能学习相对偏好。"""
+
+        slot, stage_id, model_id, gpu_id = action
+        wf_dim = env.workflow_progress_features().shape[1]
+        wf_feat = np.zeros(wf_dim, dtype=np.float32)
+        stage_type_onehot = np.zeros(env.num_stage_types, dtype=np.float32)
+        stage_scalar = np.zeros(5, dtype=np.float32)
+        model_scalar = np.zeros(8, dtype=np.float32)
+        gpu = env.gpus[gpu_id]
+        gpu_scalar = np.asarray(
+            [
+                gpu.speed / max(g.speed for g in env.gpus),
+                gpu.memory / max(g.memory for g in env.gpus),
+                gpu.bandwidth / max(g.bandwidth for g in env.gpus),
+                float(env.resident_model[gpu_id] >= 0),
+            ],
+            dtype=np.float32,
+        )
+        cross = np.zeros(11, dtype=np.float32)
+        is_wait = float(slot < 0)
+
+        if slot >= 0:
+            wf = env.active[slot]
+            stage = wf.template.stages[stage_id]
+            model = env.models[model_id]
+            wf_feat = env.workflow_progress_features()[slot]
+            stage_type_onehot[stage.stage_type] = 1.0
+            slack = wf.arrival + wf.template.deadline - env.time
+            remaining_cp = env.remaining_critical_path(wf)
+            prep = env.prep_time(model_id, gpu_id)
+            exec_t = env.exec_time(slot, stage_id, model_id, gpu_id)
+            current = int(env.resident_model[gpu_id])
+            resident_hit = float(current == model_id)
+            same_backbone = float(current >= 0 and env.models[current].backbone == model.backbone)
+            current_demand = demand[current] if current >= 0 else 0.0
+            stage_scalar = np.asarray(
+                [
+                    stage.work / 8.0,
+                    stage.min_quality,
+                    slack / max(wf.template.deadline, 1e-6),
+                    remaining_cp / max(wf.template.deadline, 1e-6),
+                    wf.template.weight / 5.0,
+                ],
+                dtype=np.float32,
+            )
+            model_scalar = np.asarray(
+                [
+                    model.quality_by_type[stage.stage_type],
+                    model.prefill_time_per_ktok,
+                    model.decode_time_per_ktok,
+                    model.memory / max(m.memory for m in env.models),
+                    model.weight_size / max(m.weight_size for m in env.models),
+                    model.adapter_size / max(m.adapter_size for m in env.models),
+                    float(stage.stage_type in model.supported_types),
+                    demand[model_id],
+                ],
+                dtype=np.float32,
+            )
+            cross = np.asarray(
+                [
+                    prep / 4.0,
+                    exec_t / 10.0,
+                    resident_hit,
+                    same_backbone,
+                    demand[model_id],
+                    current_demand,
+                    demand[model_id] - current_demand,
+                    wf.template.weight / max(0.5, slack),
+                    float(len(env.ready_stages(wf))) / max(1, len(wf.template.stages)),
+                    is_wait,
+                    1.0,
+                ],
+                dtype=np.float32,
+            )
+        else:
+            current = int(env.resident_model[gpu_id])
+            current_demand = demand[current] if current >= 0 else 0.0
+            cross = np.asarray([0.0, 0.0, 1.0, 1.0, 0.0, current_demand, -current_demand, 0.0, 0.0, is_wait, 1.0], dtype=np.float32)
+
+        return np.concatenate([wf_feat, stage_type_onehot, stage_scalar, model_scalar, gpu_scalar, cross]).astype(np.float32)
+
+    def residency_delta(self, env: WPREnv, demand: np.ndarray, action: tuple[int, int, int, int]) -> float:
+        slot, stage_id, model_id, gpu_id = action
+        if slot < 0:
+            # WAIT 保留当前 resident model；如果当前模型未来需求高，则等待更有价值。
+            current = int(env.resident_model[gpu_id])
+            return float(0.35 * (demand[current] if current >= 0 else 0.0))
+        replaced = int(env.resident_model[gpu_id])
+        replaced_demand = demand[replaced] if replaced >= 0 else 0.0
+        return float(demand[model_id] - replaced_demand - self.config.prep_lambda * env.prep_time(model_id, gpu_id))
+
+    def update(self, records: list[dict], reward: float, next_state: np.ndarray, done: bool, dt: float) -> dict[str, float]:
+        if not records:
+            return {"advantage": 0.0, "demand_loss": 0.0, "entropy": 0.0}
+        state = records[0]["state"]
+        discount = np.exp(-self.config.beta_time_discount * dt) if self.config.use_time_critic else 0.97
+        target = reward if done else reward + discount * self.critic.value(next_state)
+        advantage = self.critic.update(state, target, self.config.critic_lr)
+
+        entropies = []
+        for rec in records:
+            features = rec["features"]
+            probs = rec["probs"]
+            chosen_idx = rec["candidates"].index(rec["action"])
+            expected_feature = probs @ features
+            grad_logp = (features[chosen_idx] - expected_feature) / max(self.config.temperature, 1e-6)
+
+            # H(pi) 对 logits 的梯度：dH/dz_j = -p_j (log p_j + H)。
+            entropy = -float(np.sum(probs * np.log(np.maximum(probs, 1e-9))))
+            entropy_logit_grad = -probs * (np.log(np.maximum(probs, 1e-9)) + entropy)
+            entropy_feature_grad = (entropy_logit_grad @ features) / max(self.config.temperature, 1e-6)
+
+            self.actor_w += self.config.actor_lr * (advantage * grad_logp + self.config.entropy_coef * entropy_feature_grad)
+            self.actor_b += self.config.actor_lr * advantage * (1.0 - float(np.sum(probs)))
+            entropies.append(entropy)
+
+        demand_loss = 0.0
+        if self.config.use_demand_predictor:
+            # target 与 action 前的 state 配对，避免 S_n 输入被 S_{n+1} 标签监督。
+            demand_loss = self.demand.update(state, records[0]["demand_target"], self.config.demand_lr)
+        return {"advantage": float(advantage), "demand_loss": float(demand_loss), "entropy": float(np.mean(entropies)) if entropies else 0.0}
+
+
+def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig | None = None) -> tuple[WPRA2CAgent, list[dict[str, float]]]:
+    probe = env_factory(seed)
+    cfg = config or WPRA2CConfig(seed=seed)
+    agent = WPRA2CAgent(probe, cfg)
+    curve: list[dict[str, float]] = []
+    for ep in range(episodes):
+        env = env_factory(seed + ep)
+        env.reset(seed + ep)
+        demand_losses = []
+        advantages = []
+        entropies = []
+        while not env.done:
+            assignments, records = agent.dispatch(env, deterministic=False)
+            _, reward, done, info = env.step(assignments)
+            stats = agent.update(records, reward, agent.encode(env), done, float(info.get("dt", 0.0)))
+            demand_losses.append(stats["demand_loss"])
+            advantages.append(abs(stats["advantage"]))
+            entropies.append(stats["entropy"])
+        metrics = env.final_metrics()
+        curve.append(
+            {
+                "episode": float(ep),
+                "weighted_completed_value": metrics["weighted_completed_value"],
+                "weighted_goodput": metrics["weighted_goodput"],
+                "weighted_goodput_rate": metrics["weighted_goodput_rate"],
+                "sla_success_ratio": metrics["sla_success_ratio"],
+                "p95_latency": metrics["p95_latency"],
+                "demand_loss": float(np.mean(demand_losses)) if demand_losses else 0.0,
+                "mean_abs_advantage": float(np.mean(advantages)) if advantages else 0.0,
+                "policy_entropy": float(np.mean(entropies)) if entropies else 0.0,
+            }
+        )
+    return agent, curve
