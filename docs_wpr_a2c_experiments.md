@@ -70,7 +70,7 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 - `edf`
 - `online_greedy`：只看当前 ready queue；
 - `dag_oracle_greedy`：可访问 DAG oracle demand 的强启发式；
-- `vanilla_a2c`：真正训练的普通 A2C，不使用 progress/demand/residency 模块；
+- `vanilla_a2c`：真正训练的普通 A2C，使用相同 Actor/Critic/GAE/训练轮数/环境，但关闭 workflow-progress encoder、demand head、residency action features 和 WAIT action；
 - WPR 消融：`wpr_no_progress`、`wpr_no_demand`、`wpr_no_residency`、`wpr_fixed_gamma`、`wpr_no_shaping`。
 
 ## 指标

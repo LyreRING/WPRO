@@ -82,7 +82,7 @@
 
 8. Baselines 修正
 
-   - `vanilla_a2c`：真正训练的普通 A2C 配置，不再是确定性启发式；
+   - `vanilla_a2c`：真正训练的普通 A2C 配置，使用相同 Actor/Critic/GAE/训练轮数/环境，但关闭 workflow progress、demand head、residency action features 和 WAIT action，不再是确定性启发式；
    - `online_greedy`：只看当前 ready queue 的真实在线贪心；
    - `dag_oracle_greedy`：显式标注为可访问 DAG oracle demand 的强启发式；
    - `lookahead_search_upper_reference`：显式命名为 bounded lookahead reference，不称 optimal。

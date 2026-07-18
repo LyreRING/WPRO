@@ -273,10 +273,17 @@ def main() -> None:
         "dag_oracle_greedy": dag_oracle_residency_greedy,
     }
     agents_cfg = {
-        "vanilla_a2c": WPRA2CConfig(use_progress_encoder=False, use_demand_predictor=False, use_residency_scorer=False),
+        "vanilla_a2c": WPRA2CConfig(
+            use_progress_encoder=False,
+            use_demand_predictor=False,
+            use_residency_scorer=False,
+            use_residency_features=False,
+            use_wait_features=False,
+            allow_wait=False,
+        ),
         "wpr_no_progress": WPRA2CConfig(use_progress_encoder=False),
         "wpr_no_demand": WPRA2CConfig(use_demand_predictor=False),
-        "wpr_no_residency": WPRA2CConfig(use_residency_scorer=False),
+        "wpr_no_residency": WPRA2CConfig(use_residency_scorer=False, use_residency_features=False),
         "wpr_fixed_gamma": WPRA2CConfig(use_time_critic=False),
         "wpr_no_shaping": WPRA2CConfig(use_potential_shaping=False),
         "wpr_a2c": WPRA2CConfig(),

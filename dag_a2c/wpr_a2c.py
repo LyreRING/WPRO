@@ -45,6 +45,8 @@ class WPRA2CConfig:
     use_progress_encoder: bool = True
     use_demand_predictor: bool = True
     use_residency_scorer: bool = True
+    use_residency_features: bool = True
+    use_wait_features: bool = True
     use_time_critic: bool = True
     allow_wait: bool = True
     use_potential_shaping: bool = True
@@ -245,6 +247,8 @@ class WPRA2CAgent:
         model_scalar = np.zeros(8, dtype=np.float32)
         if slot < 0:
             gpu_scalar = self.global_wait_gpu_features(env)
+            if not self.config.use_wait_features:
+                gpu_scalar[:] = 0.0
         else:
             gpu = env.gpus[gpu_id]
             gpu_scalar = np.asarray(
@@ -263,7 +267,8 @@ class WPRA2CAgent:
             wf = env.active[slot]
             stage = wf.template.stages[stage_id]
             model = env.models[model_id]
-            wf_feat = env.workflow_progress_features()[slot]
+            if self.config.use_progress_encoder:
+                wf_feat = env.workflow_progress_features()[slot]
             stage_type_onehot[stage.stage_type] = 1.0
             slack = wf.arrival + wf.template.deadline - env.time
             remaining_cp = env.remaining_critical_path(wf)
@@ -275,6 +280,11 @@ class WPRA2CAgent:
             same_backbone = float(current >= 0 and env.models[current].backbone == model.backbone)
             current_demand = demand[current] if current >= 0 else 0.0
             delta_psi = self.residency_delta(env, demand, action) if self.config.use_residency_scorer else 0.0
+            if not self.config.use_residency_features:
+                resident_hit = 0.0
+                same_backbone = 0.0
+                current_demand = 0.0
+                delta_psi = 0.0
             best_immediate = self.best_immediate_score(env)
             next_arrival, next_completion = self.next_event_features(env)
             stage_scalar = np.asarray(
@@ -328,7 +338,16 @@ class WPRA2CAgent:
             resident_demands = [float(demand[int(m)]) for m in env.resident_model if int(m) >= 0]
             max_resident_demand = max(resident_demands, default=0.0)
             mean_resident_demand = float(np.mean(resident_demands)) if resident_demands else 0.0
+            if not self.config.use_wait_features:
+                max_resident_demand = 0.0
+                mean_resident_demand = 0.0
             next_arrival, next_completion = self.next_event_features(env)
+            wait_next_arrival = next_arrival if self.config.use_wait_features else 0.0
+            wait_next_completion = next_completion if self.config.use_wait_features else 0.0
+            wait_min_slack = self.min_ready_slack(env) if self.config.use_wait_features else 0.0
+            wait_best_immediate = self.best_immediate_score(env) if self.config.use_wait_features else 0.0
+            wait_ready_ratio = len(env.ready_pairs()) / max(1, env.max_active * env.max_stages) if self.config.use_wait_features else 0.0
+            wait_idle_ratio = len(env.idle_gpus()) / max(1, env.num_gpus) if self.config.use_wait_features else 0.0
             cross = np.asarray(
                 [
                     0.0,
@@ -342,12 +361,12 @@ class WPRA2CAgent:
                     mean_resident_demand - max_resident_demand,
                     0.0,
                     0.0,
-                    next_arrival,
-                    next_completion,
-                    self.min_ready_slack(env),
-                    self.best_immediate_score(env),
-                    len(env.ready_pairs()) / max(1, env.max_active * env.max_stages),
-                    len(env.idle_gpus()) / max(1, env.num_gpus),
+                    wait_next_arrival,
+                    wait_next_completion,
+                    wait_min_slack,
+                    wait_best_immediate,
+                    wait_ready_ratio,
+                    wait_idle_ratio,
                     is_wait,
                     1.0,
                 ],
