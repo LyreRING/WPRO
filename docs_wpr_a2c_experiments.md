@@ -7,8 +7,8 @@
 快速工程检查：
 
 ```powershell
-py run_wpr_experiments.py --quick --output outputs\wpr_smoke_reward_gae_fix
-py plot_wpr_results.py --input outputs\wpr_smoke_reward_gae_fix
+py run_wpr_experiments.py --quick --output outputs\wpr_smoke_final_fix
+py plot_wpr_results.py --input outputs\wpr_smoke_final_fix
 ```
 
 建议论文主实验：
@@ -62,6 +62,8 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
    A_n = delta_n + exp(-beta * Delta t_n) lambda A_{n+1}
    ```
 
+   实现中先用冻结的 critic 计算整条 rollout 的 `V_n`、`A_n` 和 return，再统一更新 Actor/Critic。
+
 ## Baselines
 
 - `random`
@@ -69,7 +71,7 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 - `online_greedy`：只看当前 ready queue；
 - `dag_oracle_greedy`：可访问 DAG oracle demand 的强启发式；
 - `vanilla_a2c`：真正训练的普通 A2C，不使用 progress/demand/residency 模块；
-- WPR 消融：`wpr_no_progress`、`wpr_no_demand`、`wpr_no_residency`、`wpr_fixed_gamma`。
+- WPR 消融：`wpr_no_progress`、`wpr_no_demand`、`wpr_no_residency`、`wpr_fixed_gamma`、`wpr_no_shaping`。
 
 ## 指标
 

@@ -95,7 +95,13 @@
    r_shape = r_terminal + exp(-beta * Delta t) Phi(S') - Phi(S)
    ```
 
-   `Phi(S)` 根据 active workflow 的完成进度、剩余关键路径和 deadline slack 构造。最终优化目标仍是 SLA-compliant weighted value，但中间 stage completion 和 slack 变化现在会产生学习信号。
+   `Phi(S)` 根据 active workflow 的完成进度、剩余关键路径和 deadline slack ratio 构造：
+
+   ```text
+   Phi(S)=sum_j w_j * alpha_j * clip(slack_j / D_j, 0, 1)
+   ```
+
+   因此完成 stage 会提高 potential，单纯等待导致 slack 下降时不会被反向奖励，逾期 workflow 的 potential 为 0。最终优化目标仍是 SLA-compliant weighted value，但中间 stage completion 和 slack 变化现在会产生学习信号。`enable_potential_shaping` 可关闭该项，用于 `wpr_no_shaping` 消融。
 
 11. WAIT 与事件边界
 
@@ -103,14 +109,14 @@
 
 12. Actor/Critic 更新
 
-   固定 residency scorer 不再作为额外 logit 加分项，而是进入 action feature 由 Actor 学习。Critic 从线性函数升级为两层 MLP，训练从单步 TD 改为 event-aware GAE。
+   固定 residency scorer 不再作为额外 logit 加分项，而是进入 action feature 由 Actor 学习。Critic 从线性函数升级为两层 MLP。训练从单步 TD 改为 event-aware GAE，并采用“先冻结 value 计算整条 rollout 的 advantage/return，再统一更新 Actor/Critic”的标准流程。
 
 ## 已验证命令
 
 ```powershell
 py -m py_compile dag_a2c\wpr_env.py dag_a2c\wpr_a2c.py dag_a2c\wpr_baselines.py run_wpr_experiments.py plot_wpr_results.py
-py run_wpr_experiments.py --quick --output outputs\wpr_smoke_reward_gae_fix
-py plot_wpr_results.py --input outputs\wpr_smoke_reward_gae_fix
+py run_wpr_experiments.py --quick --output outputs\wpr_smoke_final_fix
+py plot_wpr_results.py --input outputs\wpr_smoke_final_fix
 ```
 
 ## 注意

@@ -243,6 +243,7 @@ class WPREnv:
         network_latency: float = 0.08,
         shaping_beta: float = 0.035,
         shaping_epsilon: float = 0.5,
+        enable_potential_shaping: bool = True,
     ) -> None:
         self.horizon = float(horizon)
         self.arrival_rate = float(arrival_rate)
@@ -255,6 +256,7 @@ class WPREnv:
         self.network_latency = float(network_latency)
         self.shaping_beta = float(shaping_beta)
         self.shaping_epsilon = float(shaping_epsilon)
+        self.enable_potential_shaping = bool(enable_potential_shaping)
         self.templates = build_workflow_templates()
         self.models = build_model_catalogue()
         self.gpus = build_gpu_pool()
@@ -379,7 +381,7 @@ class WPREnv:
             - self.drop_penalty * (len(self.rejected_workflows) - rejected_before)
         )
         discount = float(np.exp(-self.shaping_beta * self.last_dt))
-        shaping_reward = discount * self.potential() - potential_before
+        shaping_reward = discount * self.potential() - potential_before if self.enable_potential_shaping else 0.0
         reward = terminal_reward + shaping_reward
         info = {
             "dt": self.last_dt,
@@ -477,7 +479,8 @@ class WPREnv:
             cp_done = max(0.0, 1.0 - self.remaining_critical_path(wf) / cp0)
             alpha = 0.5 * progress + 0.5 * cp_done
             slack = wf.arrival + wf.template.deadline - self.time
-            total += wf.template.weight * alpha / max(self.shaping_epsilon, slack)
+            slack_ratio = float(np.clip(slack / max(wf.template.deadline, self.shaping_epsilon), 0.0, 1.0))
+            total += wf.template.weight * alpha * slack_ratio
         return float(total)
 
     def observe(self) -> dict[str, np.ndarray]:

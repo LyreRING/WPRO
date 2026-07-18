@@ -12,7 +12,7 @@ WPRO/
 │   ├── wpr_a2c.py          # WPR-A2C、vanilla A2C 与消融配置
 │   └── wpr_baselines.py    # EDF、在线贪心、DAG-oracle 贪心、lookahead reference
 ├── outputs/
-│   └── wpr_smoke_reward_gae_fix/
+│   └── wpr_smoke_final_fix/
 │       ├── episode_metrics.csv
 │       ├── summary_metrics.csv
 │       ├── training_curve.csv
@@ -58,8 +58,8 @@ py -m pip install -r requirements.txt
 快速工程验证：
 
 ```powershell
-py run_wpr_experiments.py --quick --output outputs\wpr_smoke_reward_gae_fix
-py plot_wpr_results.py --input outputs\wpr_smoke_reward_gae_fix
+py run_wpr_experiments.py --quick --output outputs\wpr_smoke_final_fix
+py plot_wpr_results.py --input outputs\wpr_smoke_final_fix
 ```
 
 建议论文主实验：

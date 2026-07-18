@@ -38,7 +38,6 @@ class WPRA2CConfig:
     demand_lr: float = 0.006
     entropy_coef: float = 0.001
     beta_time_discount: float = 0.035
-    eta_residency: float = 0.0
     prep_lambda: float = 0.38
     wait_bias: float = -0.08
     temperature: float = 0.90
@@ -181,9 +180,10 @@ class WPRA2CAgent:
         if self.config.allow_wait and idle_gpus and env.has_future_external_event() and env.ready_pairs():
             # 全局 WAIT_ALL：只有当策略决定本轮完全不调度时才等待，避免局部 WAIT
             # 造成同一 timestamp 反复重新决策。
-            first_gpu = idle_gpus[0]
             wait_action = (WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, -1)
-            wait_candidates = [wait_action] + env.feasible_actions_for_gpu(first_gpu, used_pairs)
+            wait_candidates = [wait_action]
+            for candidate_gpu in idle_gpus:
+                wait_candidates.extend(env.feasible_actions_for_gpu(candidate_gpu, used_pairs))
             features = np.asarray([self.action_features(env, state, demand, a) for a in wait_candidates], dtype=np.float32)
             logits = features @ self.actor_w + self.actor_b
             logits = logits + np.asarray([self.config.wait_bias if a[0] < 0 else 0.0 for a in wait_candidates], dtype=np.float32)
@@ -435,33 +435,49 @@ class WPRA2CAgent:
     def update_from_gae(self, transitions: list[dict]) -> dict[str, float]:
         """Event-aware GAE update over one rollout episode."""
 
+        indexed = [tr for tr in transitions if tr["records"]]
+        if not indexed:
+            return {"advantage": 0.0, "mean_abs_advantage": 0.0, "demand_loss": 0.0, "entropy": 0.0}
+
+        states = [tr["records"][0]["state"] for tr in indexed]
+        values = np.asarray([self.critic.value(s) for s in states], dtype=np.float32)
+        next_values = np.asarray([0.0 if tr["done"] else self.critic.value(tr["next_state"]) for tr in indexed], dtype=np.float32)
+        gammas = np.asarray(
+            [np.exp(-self.config.beta_time_discount * tr["dt"]) if self.config.use_time_critic else 0.97 for tr in indexed],
+            dtype=np.float32,
+        )
+        rewards = np.asarray([tr["reward"] for tr in indexed], dtype=np.float32)
+
+        advantages = np.zeros(len(indexed), dtype=np.float32)
         gae = 0.0
-        out = {"advantage": [], "demand_loss": [], "entropy": []}
-        for tr in reversed(transitions):
-            records = tr["records"]
-            if not records:
-                continue
-            state = records[0]["state"]
-            next_state = tr["next_state"]
-            gamma = np.exp(-self.config.beta_time_discount * tr["dt"]) if self.config.use_time_critic else 0.97
-            value = self.critic.value(state)
-            next_value = 0.0 if tr["done"] else self.critic.value(next_state)
-            delta = tr["reward"] + gamma * next_value - value
-            gae = float(delta + gamma * self.config.gae_lambda * gae)
-            advantage = self.critic.update(state, value + gae, self.config.critic_lr)
-            stats = self.update_policy_heads(records, advantage)
-            for key in out:
-                out[key].append(stats[key])
+        for idx in range(len(indexed) - 1, -1, -1):
+            delta = rewards[idx] + gammas[idx] * next_values[idx] - values[idx]
+            gae = float(delta + gammas[idx] * self.config.gae_lambda * gae)
+            advantages[idx] = gae
+        returns = values + advantages
+
+        out = {"advantage": [], "mean_abs_advantage": [], "demand_loss": [], "entropy": []}
+        for tr, state, advantage, target in zip(indexed, states, advantages, returns):
+            self.critic.update(state, float(target), self.config.critic_lr)
+            stats = self.update_policy_heads(tr["records"], float(advantage))
+            out["advantage"].append(float(advantage))
+            out["mean_abs_advantage"].append(abs(float(advantage)))
+            out["demand_loss"].append(stats["demand_loss"])
+            out["entropy"].append(stats["entropy"])
         return {key: float(np.mean(vals)) if vals else 0.0 for key, vals in out.items()}
 
 
 def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig | None = None) -> tuple[WPRA2CAgent, list[dict[str, float]]]:
     probe = env_factory(seed)
     cfg = config or WPRA2CConfig(seed=seed)
+    probe.enable_potential_shaping = cfg.use_potential_shaping
+    probe.shaping_beta = cfg.beta_time_discount
     agent = WPRA2CAgent(probe, cfg)
     curve: list[dict[str, float]] = []
     for ep in range(episodes):
         env = env_factory(seed + ep)
+        env.enable_potential_shaping = cfg.use_potential_shaping
+        env.shaping_beta = cfg.beta_time_discount
         env.reset(seed + ep)
         transitions = []
         while not env.done:
@@ -487,7 +503,7 @@ def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig 
                 "sla_success_ratio": metrics["sla_success_ratio"],
                 "p95_latency": metrics["p95_latency"],
                 "demand_loss": stats["demand_loss"],
-                "mean_abs_advantage": abs(stats["advantage"]),
+                "mean_abs_advantage": stats["mean_abs_advantage"],
                 "policy_entropy": stats["entropy"],
             }
         )

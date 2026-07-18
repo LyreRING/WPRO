@@ -50,6 +50,7 @@ POLICY_SEED_OFFSET = {
     "wpr_no_demand": 211,
     "wpr_no_residency": 307,
     "wpr_fixed_gamma": 409,
+    "wpr_no_shaping": 463,
     "wpr_a2c": 521,
 }
 
@@ -63,6 +64,7 @@ POLICIES = [
     "wpr_no_demand",
     "wpr_no_residency",
     "wpr_fixed_gamma",
+    "wpr_no_shaping",
     "wpr_a2c",
 ]
 
@@ -165,6 +167,7 @@ def color(policy: str) -> str:
         "wpr_no_demand": "#60B6A4",
         "wpr_no_residency": "#9B84C6",
         "wpr_fixed_gamma": "#E08D67",
+        "wpr_no_shaping": "#5B8A72",
         "wpr_a2c": "#2A60B0",
     }.get(policy, "#677076")
 
@@ -275,6 +278,7 @@ def main() -> None:
         "wpr_no_demand": WPRA2CConfig(use_demand_predictor=False),
         "wpr_no_residency": WPRA2CConfig(use_residency_scorer=False),
         "wpr_fixed_gamma": WPRA2CConfig(use_time_critic=False),
+        "wpr_no_shaping": WPRA2CConfig(use_potential_shaping=False),
         "wpr_a2c": WPRA2CConfig(),
     }
 
