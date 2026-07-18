@@ -7,8 +7,8 @@
 快速工程检查：
 
 ```powershell
-py run_wpr_experiments.py --quick --output outputs\wpr_smoke_semantic_fix
-py plot_wpr_results.py --input outputs\wpr_smoke_semantic_fix
+py run_wpr_experiments.py --quick --output outputs\wpr_smoke_reward_gae_fix
+py plot_wpr_results.py --input outputs\wpr_smoke_reward_gae_fix
 ```
 
 建议论文主实验：
@@ -35,30 +35,31 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 
    使用 permutation-invariant pooling 编码 active workflows 和 GPU residency，避免 active slot 移动导致状态语义不稳定。
 
-2. Future Model-Demand Predictor
+2. DAG-induced Model-Demand Head
 
-   使用当前 state 预测 `oracle_dag_demand_target(H)`。该标签来自 unfinished DAG 的窗口需求估计，不写作真实 rollout future。
+   使用当前 state 学习 `oracle_dag_demand_target(H)`。当前实现更严谨地表述为 DAG-induced demand representation，而不是不可替代的真实未来预测器。
 
 3. Residency-aware cross scorer
 
-   Actor logit 包含：
+   Actor logit 不再额外硬加固定 residency 分数，而是把 residency delta、prep time、resident hit、target/current demand 等作为 action feature：
 
    ```text
-   theta^T phi(S,a) + eta * DeltaPsi(S,a)
+   z_theta(S,a) = theta^T phi(S,a)
    ```
 
    其中 `phi(S,a)` 是每个候选动作独有的 workflow/stage/model/GPU/cross 特征。
 
 4. Event-aware autoregressive matching decoder
 
-   对 idle GPUs 按固定顺序选择动作，并支持 `WAIT_g=(-1,-1,-1,g)`。
+   先判断是否执行全局 `WAIT_ALL=(-1,-1,-1,-1)`。若不等待，则按固定顺序为 idle GPUs 构造 assignment set，并尽量处理完当前可行匹配，避免同一 timestamp 反复重新决策。
 
-5. Time-aware critic
+5. Time-aware MLP critic and GAE
 
-   TD target 使用：
+   Critic 使用两层 MLP。训练时使用 event-aware GAE：
 
    ```text
-   R_n + exp(-beta * Delta t_n) V(S_{n+1})
+   delta_n = r_n + exp(-beta * Delta t_n) V(S_{n+1}) - V(S_n)
+   A_n = delta_n + exp(-beta * Delta t_n) lambda A_{n+1}
    ```
 
 ## Baselines

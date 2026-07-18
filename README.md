@@ -12,7 +12,7 @@ WPRO/
 │   ├── wpr_a2c.py          # WPR-A2C、vanilla A2C 与消融配置
 │   └── wpr_baselines.py    # EDF、在线贪心、DAG-oracle 贪心、lookahead reference
 ├── outputs/
-│   └── wpr_smoke_semantic_fix/
+│   └── wpr_smoke_reward_gae_fix/
 │       ├── episode_metrics.csv
 │       ├── summary_metrics.csv
 │       ├── training_curve.csv
@@ -37,7 +37,7 @@ WPRO/
 
 3. `dag_a2c/wpr_a2c.py`
 
-   审阅 WPR-A2C 的五个模块：workflow-progress encoder、future model-demand predictor、residency-aware scorer、autoregressive matching decoder、time-aware critic。
+   审阅 WPR-A2C 的五个模块：workflow-progress encoder、DAG-induced demand head、residency-aware action features、WAIT_ALL autoregressive matching decoder、time-aware MLP critic 与 event-aware GAE。
 
 4. `dag_a2c/wpr_baselines.py`
 
@@ -58,8 +58,8 @@ py -m pip install -r requirements.txt
 快速工程验证：
 
 ```powershell
-py run_wpr_experiments.py --quick --output outputs\wpr_smoke_semantic_fix
-py plot_wpr_results.py --input outputs\wpr_smoke_semantic_fix
+py run_wpr_experiments.py --quick --output outputs\wpr_smoke_reward_gae_fix
+py plot_wpr_results.py --input outputs\wpr_smoke_reward_gae_fix
 ```
 
 建议论文主实验：

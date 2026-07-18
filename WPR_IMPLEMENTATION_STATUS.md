@@ -87,12 +87,30 @@
    - 默认训练轮数提高到 80 episodes；
    - 输出新增 `weighted_completed_value` 和 `weighted_goodput_rate`。
 
+10. 奖励与 credit assignment
+
+   环境加入 potential-based reward shaping：
+
+   ```text
+   r_shape = r_terminal + exp(-beta * Delta t) Phi(S') - Phi(S)
+   ```
+
+   `Phi(S)` 根据 active workflow 的完成进度、剩余关键路径和 deadline slack 构造。最终优化目标仍是 SLA-compliant weighted value，但中间 stage completion 和 slack 变化现在会产生学习信号。
+
+11. WAIT 与事件边界
+
+   per-GPU WAIT 已替换为全局 `WAIT_ALL=(-1,-1,-1,-1)`。如果选择 dispatch，decoder 会继续为当前 idle GPUs 构造 assignment set；只有决定本轮完全不调度时才推进到下一个外生事件。
+
+12. Actor/Critic 更新
+
+   固定 residency scorer 不再作为额外 logit 加分项，而是进入 action feature 由 Actor 学习。Critic 从线性函数升级为两层 MLP，训练从单步 TD 改为 event-aware GAE。
+
 ## 已验证命令
 
 ```powershell
 py -m py_compile dag_a2c\wpr_env.py dag_a2c\wpr_a2c.py dag_a2c\wpr_baselines.py run_wpr_experiments.py plot_wpr_results.py
-py run_wpr_experiments.py --quick --output outputs\wpr_smoke_semantic_fix
-py plot_wpr_results.py --input outputs\wpr_smoke_semantic_fix
+py run_wpr_experiments.py --quick --output outputs\wpr_smoke_reward_gae_fix
+py plot_wpr_results.py --input outputs\wpr_smoke_reward_gae_fix
 ```
 
 ## 注意

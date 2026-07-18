@@ -241,6 +241,8 @@ class WPREnv:
         drop_penalty: float = 1.0,
         network_bandwidth: float = 12.0,
         network_latency: float = 0.08,
+        shaping_beta: float = 0.035,
+        shaping_epsilon: float = 0.5,
     ) -> None:
         self.horizon = float(horizon)
         self.arrival_rate = float(arrival_rate)
@@ -251,6 +253,8 @@ class WPREnv:
         self.drop_penalty = float(drop_penalty)
         self.network_bandwidth = float(network_bandwidth)
         self.network_latency = float(network_latency)
+        self.shaping_beta = float(shaping_beta)
+        self.shaping_epsilon = float(shaping_epsilon)
         self.templates = build_workflow_templates()
         self.models = build_model_catalogue()
         self.gpus = build_gpu_pool()
@@ -343,6 +347,7 @@ class WPREnv:
 
         self.step_count += 1
         before = self.time
+        potential_before = self.potential()
         used_pairs: set[tuple[int, int]] = set()
         used_gpus: set[int] = set()
         for slot, sid, mid, gid in assignments:
@@ -367,17 +372,22 @@ class WPREnv:
             self._advance_to_next_external_event()
             self._advance_until_decision()
         self.last_dt = max(0.0, self.time - before)
-        reward = (
+        terminal_reward = (
             self.completed_value
             - value_before
             - self.drop_penalty * (len(self.dropped_workflows) - dropped_before)
             - self.drop_penalty * (len(self.rejected_workflows) - rejected_before)
         )
+        discount = float(np.exp(-self.shaping_beta * self.last_dt))
+        shaping_reward = discount * self.potential() - potential_before
+        reward = terminal_reward + shaping_reward
         info = {
             "dt": self.last_dt,
             "new_success": self.sla_success - success_before,
             "assignments": len(assignments),
             "valid_assignments": len(used_pairs),
+            "terminal_reward": float(terminal_reward),
+            "shaping_reward": float(shaping_reward),
         }
         return self.observe(), float(reward), self.done, info
 
@@ -425,6 +435,50 @@ class WPREnv:
         # successor 尚未分配 GPU，只能用平台平均网络估计 input availability。
         cross_server = 1.0 if pred_server != 0 else 0.35
         return float(self.network_latency * cross_server + wf.output_mb[pred_id] / max(1e-6, bw))
+
+    def input_transfer_delay(self, wf: WPRWorkflow, stage_id: int, target_gpu_id: int) -> float:
+        """Dispatch-time input transfer cost coupled with the selected target GPU.
+
+        A successor can be dependency-ready, but its actual execution starts after
+        its inputs are transferred to the chosen GPU/server. This avoids computing
+        placement-dependent communication before the placement decision exists.
+        """
+
+        pred_map = self._pred_map(wf.template)
+        if not pred_map[stage_id]:
+            return 0.0
+        target_server = self.gpus[target_gpu_id].server_id
+        target_bw = self.gpus[target_gpu_id].bandwidth
+        delays = []
+        for pred in pred_map[stage_id]:
+            pred_gpu = int(wf.stage_gpu[pred])
+            if pred_gpu >= 0:
+                pred_server = self.gpus[pred_gpu].server_id
+                bw = min(target_bw, self.gpus[pred_gpu].bandwidth, self.network_bandwidth)
+            else:
+                pred_server = 2
+                bw = min(target_bw, self.network_bandwidth * 0.8)
+            latency = self.network_latency * (1.0 if pred_server != target_server else 0.25)
+            delays.append(latency + wf.output_mb[pred] / max(1e-6, bw))
+        return float(max(delays, default=0.0))
+
+    def potential(self) -> float:
+        """Potential-based reward shaping term Phi(S).
+
+        Phi(S) rewards useful workflow progress under deadline pressure. The
+        environment still optimizes terminal SLA-compliant weighted value; this
+        term only improves credit assignment through gamma*Phi(S')-Phi(S).
+        """
+
+        total = 0.0
+        for wf in self.active:
+            progress = float(np.mean(wf.completed))
+            cp0 = max(1e-6, sum((st.work if st.execution_class == "llm" else st.tool_time_mean) for st in wf.template.stages))
+            cp_done = max(0.0, 1.0 - self.remaining_critical_path(wf) / cp0)
+            alpha = 0.5 * progress + 0.5 * cp_done
+            slack = wf.arrival + wf.template.deadline - self.time
+            total += wf.template.weight * alpha / max(self.shaping_epsilon, slack)
+        return float(total)
 
     def observe(self) -> dict[str, np.ndarray]:
         prep_frac = float(np.mean(self.gpu_state == "PREPARING"))
@@ -584,14 +638,15 @@ class WPREnv:
 
     def _schedule_llm(self, slot: int, stage_id: int, model_id: int, gpu_id: int) -> None:
         wf = self.active[slot]
+        input_delay = self.input_transfer_delay(wf, stage_id, gpu_id)
         prep = self.prep_time(model_id, gpu_id)
         exec_t = self.exec_time(slot, stage_id, model_id, gpu_id)
-        prep_done = self.time + prep
+        prep_done = self.time + input_delay + prep
         finish = prep_done + exec_t
         wf.scheduled[stage_id] = True
         wf.stage_model[stage_id] = model_id
         wf.stage_gpu[stage_id] = gpu_id
-        wf.start_times[stage_id] = self.time
+        wf.start_times[stage_id] = self.time + input_delay
         wf.finish_times[stage_id] = finish
         self.gpu_available[gpu_id] = finish
         self.target_model[gpu_id] = model_id
@@ -619,6 +674,7 @@ class WPREnv:
                 "model": model_id,
                 "gpu": gpu_id,
                 "prep": prep,
+                "input_transfer": input_delay,
                 "exec": exec_t,
                 "prep_done": prep_done,
                 "finish": finish,
@@ -738,7 +794,9 @@ class WPREnv:
         for succ in succ_map[completed_stage]:
             if not all(wf.completed[p] for p in pred_map[succ]):
                 continue
-            release = max(float(wf.finish_times[p]) + self.communication_delay(wf, p, succ) for p in pred_map[succ])
+            # Dependency-ready time only requires predecessor outputs to exist.
+            # Placement-dependent input transfer is charged later at dispatch.
+            release = max(float(wf.finish_times[p]) for p in pred_map[succ])
             if not np.isfinite(wf.ready_times[succ]) or wf.ready_times[succ] < release:
                 wf.ready_times[succ] = np.float32(release)
 
@@ -764,7 +822,41 @@ class WPREnv:
 
     def _sla_feasible_at_admission(self, wf: WPRWorkflow) -> bool:
         estimate = self._estimate_min_template_duration(wf.template)
-        return bool(self.time - wf.arrival + estimate <= wf.template.deadline)
+        queue = self._queue_workload_estimate()
+        prep = self._prep_residency_estimate(wf.template)
+        finish_est = self.time - wf.arrival + queue + estimate + prep
+        return bool(finish_est <= wf.template.deadline)
+
+    def _queue_workload_estimate(self) -> float:
+        """Conservative workload-aware admission queue estimate."""
+
+        unfinished = 0.0
+        for wf in self.active:
+            unfinished += max(0.0, self.remaining_critical_path(wf))
+        running_left = sum(max(0.0, float(x["finish"]) - self.time) for x in self.running)
+        capacity = max(1e-6, sum(g.speed for g in self.gpus))
+        return float(0.35 * unfinished / capacity + 0.50 * running_left / max(1, self.num_gpus))
+
+    def _prep_residency_estimate(self, template: WPRTemplate) -> float:
+        prep = 0.0
+        for stage in template.stages:
+            if stage.execution_class != "llm":
+                continue
+            best = np.inf
+            for model in self.models:
+                if not self.model_feasible(stage, model):
+                    continue
+                for gpu in self.gpus:
+                    if model.memory <= gpu.memory + 1e-9:
+                        current = int(self.resident_model[gpu.gpu_id])
+                        if current == model.model_id:
+                            best = min(best, 0.0)
+                        elif current >= 0 and self.models[current].backbone == model.backbone:
+                            best = min(best, model.adapter_size / gpu.bandwidth + 0.08)
+                        else:
+                            best = min(best, model.weight_size / gpu.bandwidth + 0.22)
+            prep += 0.25 * float(best if np.isfinite(best) else 0.5)
+        return float(prep)
 
     def _estimate_min_template_duration(self, template: WPRTemplate) -> float:
         succ_map = self._succ_map(template)

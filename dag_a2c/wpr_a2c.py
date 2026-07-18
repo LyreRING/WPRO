@@ -38,9 +38,9 @@ class WPRA2CConfig:
     demand_lr: float = 0.006
     entropy_coef: float = 0.001
     beta_time_discount: float = 0.035
-    eta_residency: float = 1.2
+    eta_residency: float = 0.0
     prep_lambda: float = 0.38
-    wait_bias: float = -0.35
+    wait_bias: float = -0.08
     temperature: float = 0.90
     seed: int = 0
     use_progress_encoder: bool = True
@@ -48,6 +48,8 @@ class WPRA2CConfig:
     use_residency_scorer: bool = True
     use_time_critic: bool = True
     allow_wait: bool = True
+    use_potential_shaping: bool = True
+    gae_lambda: float = 0.92
 
 
 class WorkflowProgressEncoder:
@@ -111,18 +113,27 @@ class FutureModelDemandPredictor:
 class TimeAwareCritic:
     """模块 5：Time-aware critic with pooled state features."""
 
-    def __init__(self, state_dim: int) -> None:
-        self.w = np.zeros(state_dim, dtype=np.float32)
-        self.b = 0.0
+    def __init__(self, state_dim: int, rng: np.random.Generator, hidden_dim: int = 64) -> None:
+        self.W1 = rng.normal(0.0, 0.06, size=(state_dim, hidden_dim)).astype(np.float32)
+        self.b1 = np.zeros(hidden_dim, dtype=np.float32)
+        self.W2 = rng.normal(0.0, 0.03, size=hidden_dim).astype(np.float32)
+        self.b2 = 0.0
 
     def value(self, state: np.ndarray) -> float:
-        return float(state @ self.w + self.b)
+        h = np.maximum(state @ self.W1 + self.b1, 0.0)
+        return float(h @ self.W2 + self.b2)
 
     def update(self, state: np.ndarray, target: float, lr: float) -> float:
-        value = self.value(state)
+        h_pre = state @ self.W1 + self.b1
+        h = np.maximum(h_pre, 0.0)
+        value = float(h @ self.W2 + self.b2)
         advantage = float(np.clip(target - value, -10.0, 10.0))
-        self.w += lr * advantage * state
-        self.b += lr * advantage
+        old_w2 = self.W2.copy()
+        self.W2 += lr * advantage * h
+        self.b2 += lr * advantage
+        dh = advantage * old_w2 * (h_pre > 0.0)
+        self.W1 += lr * np.outer(state, dh)
+        self.b1 += lr * dh
         return advantage
 
 
@@ -138,7 +149,7 @@ class WPRA2CAgent:
         self.encoder = WorkflowProgressEncoder()
         state_dim = len(self.encode(env))
         self.demand = FutureModelDemandPredictor(state_dim, env.num_models, self.rng)
-        self.critic = TimeAwareCritic(state_dim)
+        self.critic = TimeAwareCritic(state_dim, self.rng)
         self.action_dim = len(self.action_features(env, self.encode(env), np.zeros(env.num_models, dtype=np.float32), (WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, 0)))
         self.actor_w = self.rng.normal(0.0, 0.025, size=self.action_dim).astype(np.float32)
         self.actor_b = 0.0
@@ -166,17 +177,42 @@ class WPRA2CAgent:
         records: list[dict] = []
         used_pairs: set[tuple[int, int]] = set()
 
-        for gpu_id in sorted(env.idle_gpus()):
+        idle_gpus = sorted(env.idle_gpus())
+        if self.config.allow_wait and idle_gpus and env.has_future_external_event() and env.ready_pairs():
+            # 全局 WAIT_ALL：只有当策略决定本轮完全不调度时才等待，避免局部 WAIT
+            # 造成同一 timestamp 反复重新决策。
+            first_gpu = idle_gpus[0]
+            wait_action = (WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, -1)
+            wait_candidates = [wait_action] + env.feasible_actions_for_gpu(first_gpu, used_pairs)
+            features = np.asarray([self.action_features(env, state, demand, a) for a in wait_candidates], dtype=np.float32)
+            logits = features @ self.actor_w + self.actor_b
+            logits = logits + np.asarray([self.config.wait_bias if a[0] < 0 else 0.0 for a in wait_candidates], dtype=np.float32)
+            probs = softmax(logits, self.config.temperature)
+            idx = int(np.argmax(logits)) if deterministic else int(self.rng.choice(len(wait_candidates), p=probs))
+            records.append(
+                {
+                    "state": state,
+                    "demand_target": demand_target,
+                    "action": wait_candidates[idx],
+                    "candidates": wait_candidates,
+                    "features": features,
+                    "probs": probs,
+                    "logits": logits,
+                }
+            )
+            if wait_candidates[idx][0] < 0:
+                return [wait_action], records
+            assignments.append(wait_candidates[idx])
+            used_pairs.add((wait_candidates[idx][0], wait_candidates[idx][1]))
+
+        for gpu_id in idle_gpus:
+            if any(a[3] == gpu_id for a in assignments):
+                continue
             candidates = env.feasible_actions_for_gpu(gpu_id, used_pairs)
-            if self.config.allow_wait and env.has_future_external_event():
-                candidates = candidates + [(WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, gpu_id)]
             if not candidates:
                 continue
             features = np.asarray([self.action_features(env, state, demand, a) for a in candidates], dtype=np.float32)
             logits = features @ self.actor_w + self.actor_b
-            if self.config.use_residency_scorer:
-                logits = logits + np.asarray([self.residency_delta(env, demand, a) for a in candidates], dtype=np.float32) * self.config.eta_residency
-            logits = logits + np.asarray([self.config.wait_bias if a[0] < 0 else 0.0 for a in candidates], dtype=np.float32)
             probs = softmax(logits, self.config.temperature)
             idx = int(np.argmax(logits)) if deterministic else int(self.rng.choice(len(candidates), p=probs))
             action = candidates[idx]
@@ -202,6 +238,8 @@ class WPRA2CAgent:
         """构造 phi(S,a)：每个候选动作都有不同特征，actor 才能学习相对偏好。"""
 
         slot, stage_id, model_id, gpu_id = action
+        if gpu_id < 0:
+            gpu_id = env.idle_gpus()[0] if env.idle_gpus() else 0
         wf_dim = env.workflow_progress_features().shape[1]
         wf_feat = np.zeros(wf_dim, dtype=np.float32)
         stage_type_onehot = np.zeros(env.num_stage_types, dtype=np.float32)
@@ -217,7 +255,7 @@ class WPRA2CAgent:
             ],
             dtype=np.float32,
         )
-        cross = np.zeros(11, dtype=np.float32)
+        cross = np.zeros(18, dtype=np.float32)
         is_wait = float(slot < 0)
 
         if slot >= 0:
@@ -229,11 +267,15 @@ class WPRA2CAgent:
             slack = wf.arrival + wf.template.deadline - env.time
             remaining_cp = env.remaining_critical_path(wf)
             prep = env.prep_time(model_id, gpu_id)
+            input_delay = env.input_transfer_delay(wf, stage_id, gpu_id)
             exec_t = env.exec_time(slot, stage_id, model_id, gpu_id)
             current = int(env.resident_model[gpu_id])
             resident_hit = float(current == model_id)
             same_backbone = float(current >= 0 and env.models[current].backbone == model.backbone)
             current_demand = demand[current] if current >= 0 else 0.0
+            delta_psi = self.residency_delta(env, demand, action) if self.config.use_residency_scorer else 0.0
+            best_immediate = self.best_immediate_score(env)
+            next_arrival, next_completion = self.next_event_features(env)
             stage_scalar = np.asarray(
                 [
                     stage.work / 8.0,
@@ -260,14 +302,22 @@ class WPRA2CAgent:
             cross = np.asarray(
                 [
                     prep / 4.0,
+                    input_delay / 4.0,
                     exec_t / 10.0,
                     resident_hit,
                     same_backbone,
                     demand[model_id],
                     current_demand,
                     demand[model_id] - current_demand,
+                    delta_psi,
                     wf.template.weight / max(0.5, slack),
                     float(len(env.ready_stages(wf))) / max(1, len(wf.template.stages)),
+                    next_arrival,
+                    next_completion,
+                    self.min_ready_slack(env),
+                    best_immediate,
+                    len(env.ready_pairs()) / max(1, env.max_active * env.max_stages),
+                    len(env.idle_gpus()) / max(1, env.num_gpus),
                     is_wait,
                     1.0,
                 ],
@@ -276,7 +326,31 @@ class WPRA2CAgent:
         else:
             current = int(env.resident_model[gpu_id])
             current_demand = demand[current] if current >= 0 else 0.0
-            cross = np.asarray([0.0, 0.0, 1.0, 1.0, 0.0, current_demand, -current_demand, 0.0, 0.0, is_wait, 1.0], dtype=np.float32)
+            next_arrival, next_completion = self.next_event_features(env)
+            cross = np.asarray(
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    0.0,
+                    current_demand,
+                    -current_demand,
+                    -current_demand,
+                    0.0,
+                    0.0,
+                    next_arrival,
+                    next_completion,
+                    self.min_ready_slack(env),
+                    self.best_immediate_score(env),
+                    len(env.ready_pairs()) / max(1, env.max_active * env.max_stages),
+                    len(env.idle_gpus()) / max(1, env.num_gpus),
+                    is_wait,
+                    1.0,
+                ],
+                dtype=np.float32,
+            )
 
         return np.concatenate([wf_feat, stage_type_onehot, stage_scalar, model_scalar, gpu_scalar, cross]).astype(np.float32)
 
@@ -290,14 +364,42 @@ class WPRA2CAgent:
         replaced_demand = demand[replaced] if replaced >= 0 else 0.0
         return float(demand[model_id] - replaced_demand - self.config.prep_lambda * env.prep_time(model_id, gpu_id))
 
-    def update(self, records: list[dict], reward: float, next_state: np.ndarray, done: bool, dt: float) -> dict[str, float]:
+    def next_event_features(self, env: WPREnv) -> tuple[float, float]:
+        next_arrival = np.inf
+        if env.pending:
+            next_arrival = max(0.0, float(env.pending[0].arrival - env.time))
+        next_completion = np.inf
+        if env.running:
+            next_completion = min(max(0.0, float(x["finish"]) - env.time) for x in env.running)
+        scale = max(1.0, env.horizon)
+        return (
+            float(min(next_arrival, scale) / scale),
+            float(min(next_completion, scale) / scale),
+        )
+
+    def min_ready_slack(self, env: WPREnv) -> float:
+        vals = []
+        for slot, _sid in env.ready_pairs():
+            wf = env.active[slot]
+            vals.append((wf.arrival + wf.template.deadline - env.time) / max(wf.template.deadline, 1e-6))
+        return float(np.clip(min(vals, default=1.0), -1.0, 1.0))
+
+    def best_immediate_score(self, env: WPREnv) -> float:
+        best = -10.0
+        for g in env.idle_gpus():
+            for slot, sid, mid, gid in env.feasible_actions_for_gpu(g):
+                wf = env.active[slot]
+                slack = wf.arrival + wf.template.deadline - env.time
+                score = wf.template.weight / max(0.5, slack) - 0.20 * (env.input_transfer_delay(wf, sid, gid) + env.prep_time(mid, gid) + env.exec_time(slot, sid, mid, gid))
+                best = max(best, float(score))
+        return float(np.clip(best, -10.0, 10.0) / 10.0)
+
+    def update_policy_heads(self, records: list[dict], advantage: float) -> dict[str, float]:
+        """Update actor and demand head with a precomputed advantage."""
+
         if not records:
             return {"advantage": 0.0, "demand_loss": 0.0, "entropy": 0.0}
         state = records[0]["state"]
-        discount = np.exp(-self.config.beta_time_discount * dt) if self.config.use_time_critic else 0.97
-        target = reward if done else reward + discount * self.critic.value(next_state)
-        advantage = self.critic.update(state, target, self.config.critic_lr)
-
         entropies = []
         for rec in records:
             features = rec["features"]
@@ -306,20 +408,51 @@ class WPRA2CAgent:
             expected_feature = probs @ features
             grad_logp = (features[chosen_idx] - expected_feature) / max(self.config.temperature, 1e-6)
 
-            # H(pi) 对 logits 的梯度：dH/dz_j = -p_j (log p_j + H)。
+            # Entropy gradient for a softmax-linear policy.
             entropy = -float(np.sum(probs * np.log(np.maximum(probs, 1e-9))))
             entropy_logit_grad = -probs * (np.log(np.maximum(probs, 1e-9)) + entropy)
             entropy_feature_grad = (entropy_logit_grad @ features) / max(self.config.temperature, 1e-6)
 
             self.actor_w += self.config.actor_lr * (advantage * grad_logp + self.config.entropy_coef * entropy_feature_grad)
-            self.actor_b += self.config.actor_lr * advantage * (1.0 - float(np.sum(probs)))
             entropies.append(entropy)
 
         demand_loss = 0.0
         if self.config.use_demand_predictor:
-            # target 与 action 前的 state 配对，避免 S_n 输入被 S_{n+1} 标签监督。
             demand_loss = self.demand.update(state, records[0]["demand_target"], self.config.demand_lr)
         return {"advantage": float(advantage), "demand_loss": float(demand_loss), "entropy": float(np.mean(entropies)) if entropies else 0.0}
+
+    def update(self, records: list[dict], reward: float, next_state: np.ndarray, done: bool, dt: float) -> dict[str, float]:
+        """Backward-compatible one-step update."""
+
+        if not records:
+            return {"advantage": 0.0, "demand_loss": 0.0, "entropy": 0.0}
+        state = records[0]["state"]
+        discount = np.exp(-self.config.beta_time_discount * dt) if self.config.use_time_critic else 0.97
+        target = reward if done else reward + discount * self.critic.value(next_state)
+        advantage = self.critic.update(state, target, self.config.critic_lr)
+        return self.update_policy_heads(records, advantage)
+
+    def update_from_gae(self, transitions: list[dict]) -> dict[str, float]:
+        """Event-aware GAE update over one rollout episode."""
+
+        gae = 0.0
+        out = {"advantage": [], "demand_loss": [], "entropy": []}
+        for tr in reversed(transitions):
+            records = tr["records"]
+            if not records:
+                continue
+            state = records[0]["state"]
+            next_state = tr["next_state"]
+            gamma = np.exp(-self.config.beta_time_discount * tr["dt"]) if self.config.use_time_critic else 0.97
+            value = self.critic.value(state)
+            next_value = 0.0 if tr["done"] else self.critic.value(next_state)
+            delta = tr["reward"] + gamma * next_value - value
+            gae = float(delta + gamma * self.config.gae_lambda * gae)
+            advantage = self.critic.update(state, value + gae, self.config.critic_lr)
+            stats = self.update_policy_heads(records, advantage)
+            for key in out:
+                out[key].append(stats[key])
+        return {key: float(np.mean(vals)) if vals else 0.0 for key, vals in out.items()}
 
 
 def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig | None = None) -> tuple[WPRA2CAgent, list[dict[str, float]]]:
@@ -330,16 +463,20 @@ def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig 
     for ep in range(episodes):
         env = env_factory(seed + ep)
         env.reset(seed + ep)
-        demand_losses = []
-        advantages = []
-        entropies = []
+        transitions = []
         while not env.done:
             assignments, records = agent.dispatch(env, deterministic=False)
             _, reward, done, info = env.step(assignments)
-            stats = agent.update(records, reward, agent.encode(env), done, float(info.get("dt", 0.0)))
-            demand_losses.append(stats["demand_loss"])
-            advantages.append(abs(stats["advantage"]))
-            entropies.append(stats["entropy"])
+            transitions.append(
+                {
+                    "records": records,
+                    "reward": float(reward),
+                    "next_state": agent.encode(env),
+                    "done": bool(done),
+                    "dt": float(info.get("dt", 0.0)),
+                }
+            )
+        stats = agent.update_from_gae(transitions)
         metrics = env.final_metrics()
         curve.append(
             {
@@ -349,9 +486,9 @@ def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig 
                 "weighted_goodput_rate": metrics["weighted_goodput_rate"],
                 "sla_success_ratio": metrics["sla_success_ratio"],
                 "p95_latency": metrics["p95_latency"],
-                "demand_loss": float(np.mean(demand_losses)) if demand_losses else 0.0,
-                "mean_abs_advantage": float(np.mean(advantages)) if advantages else 0.0,
-                "policy_entropy": float(np.mean(entropies)) if entropies else 0.0,
+                "demand_loss": stats["demand_loss"],
+                "mean_abs_advantage": abs(stats["advantage"]),
+                "policy_entropy": stats["entropy"],
             }
         )
     return agent, curve
