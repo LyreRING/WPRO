@@ -137,3 +137,15 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 ```
 
 如果后续需要严格 optimality gap，应单独实现小规模 MILP/CP-SAT；当前 `lookahead_gap` 只能解释为相对 bounded lookahead reference 的 gap。
+## Trace-driven workload support
+
+当前版本已经加入 trace-driven workload 入口，用来支撑论文中的 realistic evaluation：
+
+- `WorkloadSource` 统一 synthetic 和 trace-driven workload；
+- `SyntheticWorkloadSource` 保留 controlled synthetic 实验，用于负载、deadline、GPU 异构、cold load 等敏感性分析；
+- `TraceWorkloadSource` 读取真实请求 trace 的 arrival timestamp、input tokens、output tokens、model name 和可选 elapsed time；
+- trace request 会与 application workflow template 结合，实例化为 agentic workflow DAG；
+- 到达过程不再从指数分布重新采样，而是直接 replay trace timestamp，可通过 `--time-scale` 做时间压缩；
+- `run_wpr_trace_experiments.py` 提供独立 trace-driven 训练、评估、汇总和绘图入口。
+
+论文中应把该部分描述为 measurement-calibrated, trace-driven simulator under production-derived LLM workloads。注意不要声称 trace 原生包含完整 agent workflow DAG，也不要把当前 demand label 写成真实未来需求的 perfect prediction；更严谨的写法是 DAG-induced near-future model-demand estimation。

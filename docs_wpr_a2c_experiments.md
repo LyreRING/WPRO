@@ -84,3 +84,26 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 - `rejected`
 - `dropped`
 - `lookahead_gap`：相对 bounded lookahead reference，不是 strict optimality gap。
+## Trace-driven realistic evaluation
+
+除 controlled synthetic workload 之外，当前代码已经提供 trace-driven evaluation 入口：
+
+```powershell
+py run_wpr_trace_experiments.py --trace-path data\sample_trace_requests.csv --quick --output outputs\wpr_trace_smoke
+```
+
+真实 trace 建议至少包含：
+
+- `timestamp`：真实请求到达时间；
+- `request_tokens` / `input_tokens`：输入 token 长度；
+- `response_tokens` / `output_tokens`：输出 token 长度；
+- `model`：请求使用或偏好的模型名称，可选；
+- `elapsed_time`：原始请求端到端延迟，可选，用于 deadline calibration。
+
+实验方法：
+
+```text
+real request trace + application workflow template = trace-driven workflow instance
+```
+
+也就是说，真实 trace 提供生产负载的到达过程和 token 分布，workflow DAG 由应用模板给出。该设置适合作为论文的 realistic evaluation；controlled synthetic workload 继续用于研究 arrival rate、deadline tightness、GPU heterogeneity、cold load cost 等因素的可控敏感性。

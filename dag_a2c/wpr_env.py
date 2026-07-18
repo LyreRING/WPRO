@@ -12,8 +12,10 @@ system model：
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Literal, Protocol
 
 import numpy as np
 
@@ -91,6 +93,131 @@ class WPRWorkflow:
     actual_output_tokens: np.ndarray
     output_mb: np.ndarray
     exec_jitter: np.ndarray
+
+
+class WorkloadSource(Protocol):
+    """统一 workload 输入接口。
+
+    Synthetic 和 trace-driven workload 都返回已经实例化好的 WPRWorkflow 列表。
+    环境后续的 admission、调度、通信和执行逻辑完全一致。
+    """
+
+    def load(self, env: "WPREnv") -> list[WPRWorkflow]:
+        ...
+
+
+@dataclass(frozen=True)
+class SyntheticWorkloadSource:
+    """参数化随机 workload，用于 controlled experiments。"""
+
+    def load(self, env: "WPREnv") -> list[WPRWorkflow]:
+        return env._generate_synthetic_arrivals()
+
+
+@dataclass(frozen=True)
+class TraceWorkloadSource:
+    """CSV trace-driven workload loader。
+
+    该 loader 使用真实 trace 中的 arrival timestamp 与 input/output token 长度，
+    再将每条请求实例化为应用 workflow DAG。它不声称 trace 原生包含 DAG，而是实现：
+
+        real request trace + application workflow template
+        = trace-driven workflow instance
+    """
+
+    path: str | Path
+    time_scale: float = 1.0
+    max_requests: int | None = None
+    start_time: float | None = None
+    duration: float | None = None
+    timestamp_col: str | None = None
+    input_tokens_col: str | None = None
+    output_tokens_col: str | None = None
+    model_col: str | None = None
+    elapsed_col: str | None = None
+    deadline_mode: str = "template"
+    deadline_multiplier: float = 2.5
+
+    def load(self, env: "WPREnv") -> list[WPRWorkflow]:
+        rows = self._read_rows()
+        if not rows:
+            return []
+        timestamp_key = self._resolve_key(rows[0], self.timestamp_col, ("timestamp", "time", "arrival", "created_at"))
+        input_key = self._resolve_key(rows[0], self.input_tokens_col, ("request tokens", "request_tokens", "input_tokens", "prompt_tokens", "input length"))
+        output_key = self._resolve_key(rows[0], self.output_tokens_col, ("response tokens", "response_tokens", "output_tokens", "completion_tokens", "output length"))
+        model_key = self._resolve_key(rows[0], self.model_col, ("model", "model_name", "engine", "type"), required=False)
+        elapsed_key = self._resolve_key(rows[0], self.elapsed_col, ("elapsed time", "elapsed_time", "latency", "duration"), required=False)
+
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            ts = self._as_float(row.get(timestamp_key))
+            if ts is None:
+                continue
+            parsed.append({"row": row, "timestamp": ts})
+        if not parsed:
+            return []
+        parsed.sort(key=lambda x: x["timestamp"])
+        t0 = parsed[0]["timestamp"] if self.start_time is None else float(self.start_time)
+
+        workflows: list[WPRWorkflow] = []
+        for item in parsed:
+            raw_t = float(item["timestamp"])
+            if raw_t < t0:
+                continue
+            arrival = (raw_t - t0) / max(self.time_scale, 1e-9)
+            if self.duration is not None and arrival > self.duration:
+                continue
+            row = item["row"]
+            request_tokens = self._as_float(row.get(input_key), default=1024.0)
+            response_tokens = self._as_float(row.get(output_key), default=256.0)
+            model_name = str(row.get(model_key, "")) if model_key else ""
+            elapsed = self._as_float(row.get(elapsed_key), default=None) if elapsed_key else None
+            template = env.select_trace_template(model_name, request_tokens, response_tokens)
+            deadline_override = None
+            if self.deadline_mode == "elapsed" and elapsed is not None:
+                deadline_override = max(1.0, self.deadline_multiplier * elapsed / max(self.time_scale, 1e-9))
+            elif self.deadline_mode == "relative":
+                min_duration = env._estimate_min_template_duration(template)
+                deadline_override = max(1.0, self.deadline_multiplier * min_duration)
+            workflows.append(
+                env.instantiate_workflow(
+                    len(workflows),
+                    template,
+                    arrival,
+                    request_tokens=request_tokens,
+                    response_tokens=response_tokens,
+                    deadline_override=deadline_override,
+                )
+            )
+            if self.max_requests is not None and len(workflows) >= self.max_requests:
+                break
+        return workflows
+
+    def _read_rows(self) -> list[dict[str, str]]:
+        path = Path(self.path)
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+
+    @staticmethod
+    def _resolve_key(row: dict[str, str], explicit: str | None, candidates: tuple[str, ...], required: bool = True) -> str | None:
+        if explicit:
+            return explicit
+        lookup = {k.strip().lower(): k for k in row}
+        for cand in candidates:
+            if cand.lower() in lookup:
+                return lookup[cand.lower()]
+        if required:
+            raise ValueError(f"Cannot resolve trace column from candidates: {candidates}")
+        return None
+
+    @staticmethod
+    def _as_float(value: Any, default: float | None = None) -> float | None:
+        if value is None or value == "":
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
 
 def build_workflow_templates() -> tuple[WPRTemplate, ...]:
@@ -245,6 +372,7 @@ class WPREnv:
         shaping_beta: float = 0.035,
         shaping_epsilon: float = 0.5,
         enable_potential_shaping: bool = True,
+        workload_source: WorkloadSource | None = None,
     ) -> None:
         self.horizon = float(horizon)
         self.arrival_rate = float(arrival_rate)
@@ -258,6 +386,7 @@ class WPREnv:
         self.shaping_beta = float(shaping_beta)
         self.shaping_epsilon = float(shaping_epsilon)
         self.enable_potential_shaping = bool(enable_potential_shaping)
+        self.workload_source = workload_source or SyntheticWorkloadSource()
         self.templates = build_workflow_templates()
         self.models = build_model_catalogue()
         self.gpus = build_gpu_pool()
@@ -271,7 +400,7 @@ class WPREnv:
         if seed is not None:
             self.seed = int(seed)
         self.rng = np.random.default_rng(self.seed)
-        self.pending = self._generate_arrivals()
+        self.pending = self.workload_source.load(self)
         self.all_workflows = list(self.pending)
         self.active: list[WPRWorkflow] = []
         self.done_workflows: list[WPRWorkflow] = []
@@ -953,7 +1082,112 @@ class WPREnv:
                 keep.append(wf)
         self.active = keep
 
-    def _generate_arrivals(self) -> list[WPRWorkflow]:
+    def instantiate_workflow(
+        self,
+        workflow_id: int,
+        template: WPRTemplate,
+        arrival: float,
+        request_tokens: float | None = None,
+        response_tokens: float | None = None,
+        deadline_override: float | None = None,
+    ) -> WPRWorkflow:
+        """Instantiate a workflow DAG from either synthetic or trace inputs."""
+
+        n = len(template.stages)
+        if deadline_override is not None:
+            template = WPRTemplate(
+                template.name,
+                template.stages,
+                template.edges,
+                deadline=float(deadline_override),
+                weight=template.weight,
+                service_class=template.service_class,
+            )
+        if request_tokens is None:
+            input_tokens = np.asarray([max(64.0, self.rng.lognormal(np.log(st.input_tokens_mean * 1000.0), 0.22)) for st in template.stages], dtype=np.float32)
+        else:
+            input_tokens = self.trace_stage_input_tokens(template, float(request_tokens), float(response_tokens or max(16.0, request_tokens * 0.15)))
+        if response_tokens is None:
+            expected_out = np.asarray([max(16.0, st.output_tokens_mean * 1000.0) for st in template.stages], dtype=np.float32)
+            actual_out = np.asarray([max(16.0, self.rng.lognormal(np.log(max(16.0, st.output_tokens_mean * 1000.0)), 0.25)) for st in template.stages], dtype=np.float32)
+        else:
+            actual_out = self.trace_stage_output_tokens(template, float(request_tokens or 1024.0), float(response_tokens))
+            expected_out = actual_out.copy()
+        output_mb = np.asarray([max(0.05, self.rng.lognormal(np.log(max(0.05, st.output_mb_mean)), 0.20)) for st in template.stages], dtype=np.float32)
+        exec_jitter = self.rng.lognormal(mean=0.0, sigma=0.08, size=(n, self.num_models, self.num_gpus)).astype(np.float32)
+        return WPRWorkflow(
+            workflow_id,
+            template,
+            float(arrival),
+            False,
+            np.zeros(n, bool),
+            np.zeros(n, bool),
+            np.full(n, np.nan, np.float32),
+            np.full(n, -1, np.int64),
+            np.full(n, -1, np.int64),
+            np.full(n, np.inf, np.float32),
+            np.full(n, np.nan, np.float32),
+            input_tokens,
+            expected_out,
+            actual_out,
+            output_mb,
+            exec_jitter,
+        )
+
+    def trace_stage_input_tokens(self, template: WPRTemplate, request_tokens: float, response_tokens: float) -> np.ndarray:
+        """Map trace-level tokens to stage-level input tokens using template profiles."""
+
+        vals = []
+        for st in template.stages:
+            name = st.name.lower()
+            if st.execution_class != "llm":
+                vals.append(max(64.0, 0.08 * request_tokens))
+            elif "plan" in name:
+                vals.append(max(64.0, 0.15 * request_tokens))
+            elif "summary" in name or "salience" in name or "refine" in name:
+                vals.append(max(128.0, 0.55 * request_tokens + 0.20 * response_tokens))
+            elif "verify" in name or "check" in name:
+                vals.append(max(64.0, 0.35 * response_tokens + 0.10 * request_tokens))
+            elif "repair" in name:
+                vals.append(max(128.0, 0.65 * request_tokens + 0.45 * response_tokens))
+            else:
+                vals.append(max(128.0, request_tokens + 0.25 * response_tokens))
+        return np.asarray(vals, dtype=np.float32)
+
+    def trace_stage_output_tokens(self, template: WPRTemplate, request_tokens: float, response_tokens: float) -> np.ndarray:
+        """Map trace-level response tokens to stage-level output tokens."""
+
+        vals = []
+        for st in template.stages:
+            name = st.name.lower()
+            if st.execution_class != "llm":
+                vals.append(16.0)
+            elif "plan" in name:
+                vals.append(max(16.0, 0.08 * response_tokens))
+            elif "summary" in name or "salience" in name:
+                vals.append(max(32.0, 0.25 * response_tokens))
+            elif "verify" in name or "check" in name:
+                vals.append(max(16.0, 0.05 * response_tokens))
+            elif "repair" in name:
+                vals.append(max(32.0, 0.45 * response_tokens))
+            else:
+                vals.append(max(32.0, response_tokens))
+        return np.asarray(vals, dtype=np.float32)
+
+    def select_trace_template(self, model_name: str, request_tokens: float, response_tokens: float) -> WPRTemplate:
+        """Heuristic request-to-DAG mapping for trace-driven instantiation."""
+
+        name = model_name.lower()
+        by_name = {t.name: t for t in self.templates}
+        if "code" in name or "repair" in name:
+            return by_name["coding_repair" if response_tokens > 600 else "coding_success"]
+        if request_tokens > 6000:
+            return by_name["document_analysis"]
+        if response_tokens > 1200 or "gpt-4" in name or "reason" in name:
+            return by_name["deep_research"]
+        return by_name["rag_qa"]
+
+    def _generate_synthetic_arrivals(self) -> list[WPRWorkflow]:
         arrivals: list[WPRWorkflow] = []
         t = 0.0
         wid = 0
@@ -963,32 +1197,7 @@ class WPREnv:
             if t >= self.horizon:
                 break
             template = self.templates[int(self.rng.choice(len(self.templates), p=probs))]
-            n = len(template.stages)
-            input_tokens = np.asarray([max(64.0, self.rng.lognormal(np.log(st.input_tokens_mean * 1000.0), 0.22)) for st in template.stages], dtype=np.float32)
-            expected_out = np.asarray([max(16.0, st.output_tokens_mean * 1000.0) for st in template.stages], dtype=np.float32)
-            actual_out = np.asarray([max(16.0, self.rng.lognormal(np.log(max(16.0, st.output_tokens_mean * 1000.0)), 0.25)) for st in template.stages], dtype=np.float32)
-            output_mb = np.asarray([max(0.05, self.rng.lognormal(np.log(max(0.05, st.output_mb_mean)), 0.20)) for st in template.stages], dtype=np.float32)
-            exec_jitter = self.rng.lognormal(mean=0.0, sigma=0.08, size=(n, self.num_models, self.num_gpus)).astype(np.float32)
-            arrivals.append(
-                WPRWorkflow(
-                    wid,
-                    template,
-                    t,
-                    False,
-                    np.zeros(n, bool),
-                    np.zeros(n, bool),
-                    np.full(n, np.nan, np.float32),
-                    np.full(n, -1, np.int64),
-                    np.full(n, -1, np.int64),
-                    np.full(n, np.inf, np.float32),
-                    np.full(n, np.nan, np.float32),
-                    input_tokens,
-                    expected_out,
-                    actual_out,
-                    output_mb,
-                    exec_jitter,
-                )
-            )
+            arrivals.append(self.instantiate_workflow(wid, template, t))
             wid += 1
         return arrivals
 
