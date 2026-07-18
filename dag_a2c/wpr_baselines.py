@@ -130,19 +130,21 @@ def lookahead_search_upper_reference(seed: int, horizon: float = 18.0, arrival_r
                 score = wf.template.weight / max(0.5, slack) - 0.2 * e.prep_time(mid, gid) - 0.15 * e.expected_exec_time(slot, sid, mid, gid)
                 scored.append((score, a))
             gpu_actions = [a for _, a in sorted(scored, reverse=True)[:top_k]]
-            if e.has_future_external_event():
-                gpu_actions.append((-1, -1, -1, g))
             per_gpu.append(gpu_actions)
+        if not per_gpu:
+            return [[(-1, -1, -1, -1)]] if e.has_future_external_event() else [[]]
         sets: list[list[tuple[int, int, int, int]]] = [[]]
         for cand in per_gpu:
-            new_sets = list(sets)
+            new_sets: list[list[tuple[int, int, int, int]]] = []
             for base in sets:
                 used = {(a[0], a[1]) for a in base if a[0] >= 0}
                 for a in cand:
                     if a[0] < 0 or (a[0], a[1]) not in used:
                         new_sets.append(base + [a])
             sets = new_sets[:max_sets]
-        return sets or [[]]
+        if e.has_future_external_event():
+            sets.append([(-1, -1, -1, -1)])
+        return sets or [[(-1, -1, -1, -1)]]
 
     init = WPREnv(horizon=horizon, arrival_rate=arrival_rate, max_active=3, seed=seed)
     init.reset(seed)
@@ -155,8 +157,15 @@ def lookahead_search_upper_reference(seed: int, horizon: float = 18.0, arrival_r
                 continue
             for assn in candidate_sets(env):
                 nxt = clone_env(env)
-                nxt.step(assn)
+                try:
+                    nxt.step(assn)
+                except RuntimeError as exc:
+                    if "Zero-time transition without state change" not in str(exc):
+                        raise
+                    continue
                 expanded.append(nxt)
+        if not expanded:
+            break
         expanded.sort(key=state_score, reverse=True)
         beam = expanded[:28]
         if all(env.done for env in beam):

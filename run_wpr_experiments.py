@@ -51,6 +51,7 @@ POLICY_SEED_OFFSET = {
     "wpr_no_residency": 307,
     "wpr_fixed_gamma": 409,
     "wpr_no_shaping": 463,
+    "wpr_with_wait": 491,
     "wpr_a2c": 521,
 }
 
@@ -65,6 +66,7 @@ POLICIES = [
     "wpr_no_residency",
     "wpr_fixed_gamma",
     "wpr_no_shaping",
+    "wpr_with_wait",
     "wpr_a2c",
 ]
 
@@ -76,6 +78,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--seeds", type=int, default=3)
     p.add_argument("--base-seed", type=int, default=20260717)
     p.add_argument("--output", type=Path, default=None)
+    p.add_argument("--scenario", action="append", choices=[s.name for s in SCENARIOS], help="Run only selected scenario(s). Can be repeated.")
     p.add_argument("--quick", action="store_true")
     return p
 
@@ -168,14 +171,18 @@ def color(policy: str) -> str:
         "wpr_no_residency": "#9B84C6",
         "wpr_fixed_gamma": "#E08D67",
         "wpr_no_shaping": "#5B8A72",
+        "wpr_with_wait": "#B56AA0",
         "wpr_a2c": "#2A60B0",
     }.get(policy, "#677076")
 
 
 def draw_grouped_bars(path: Path, summary: list[dict], metric: str, title: str, higher: bool = True) -> None:
-    scenarios = [s.name for s in SCENARIOS]
+    present = {r["scenario"] for r in summary}
+    scenarios = [s.name for s in SCENARIOS if s.name in present]
     lookup = {(r["scenario"], r["policy"]): r for r in summary}
     vals = [float(lookup[(s, p)][f"{metric}_mean"]) for s in scenarios for p in POLICIES if (s, p) in lookup]
+    if metric.endswith("gap"):
+        vals = [max(0.0, v) for v in vals]
     vmax = max(vals + [1e-9])
     img = Image.new("RGB", (1900, 1040), "white")
     d = ImageDraw.Draw(img)
@@ -198,6 +205,8 @@ def draw_grouped_bars(path: Path, summary: list[dict], metric: str, title: str, 
             if not row:
                 continue
             v = float(row[f"{metric}_mean"])
+            if metric.endswith("gap"):
+                v = max(0.0, v)
             sem = float(row[f"{metric}_sem"])
             bh = v / max(vmax, 1e-9) * h
             x = gx + pi * (bar_w + 9)
@@ -251,6 +260,9 @@ def draw_training(path: Path, rows: list[dict]) -> None:
 def main() -> None:
     args = parser().parse_args()
     scenarios = list(SCENARIOS)
+    if args.scenario:
+        selected = set(args.scenario)
+        scenarios = [s for s in scenarios if s.name in selected]
     output_was_default = args.output is None
     if args.quick:
         args.episodes = 8
@@ -286,7 +298,8 @@ def main() -> None:
         "wpr_no_residency": WPRA2CConfig(use_residency_scorer=False, use_residency_features=False),
         "wpr_fixed_gamma": WPRA2CConfig(use_time_critic=False),
         "wpr_no_shaping": WPRA2CConfig(use_potential_shaping=False),
-        "wpr_a2c": WPRA2CConfig(),
+        "wpr_with_wait": WPRA2CConfig(actor_lr=0.003, critic_lr=0.008, entropy_coef=0.0005, wait_bias=-1.0),
+        "wpr_a2c": WPRA2CConfig(actor_lr=0.003, critic_lr=0.008, entropy_coef=0.0005, allow_wait=False, use_wait_features=False),
     }
 
     for sidx, scenario in enumerate(scenarios):
@@ -314,6 +327,11 @@ def main() -> None:
                     row["lookahead_reference_value"] = reference
                     row["lookahead_gap"] = (reference - row["weighted_completed_value"]) / max(reference, 1e-9) if reference > 0 else 0.0
                     rows.append(row)
+            # Checkpoint after each scenario/seed block so long runs do not lose completed results.
+            summary = summarize(rows)
+            write_csv(out / "episode_metrics.csv", rows)
+            write_csv(out / "training_curve.csv", train_rows)
+            write_csv(out / "summary_metrics.csv", summary)
 
     summary = summarize(rows)
     write_csv(out / "episode_metrics.csv", rows)

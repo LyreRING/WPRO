@@ -12,7 +12,8 @@ WPRO/
 │   ├── wpr_a2c.py          # WPR-A2C、vanilla A2C 与消融配置
 │   └── wpr_baselines.py    # EDF、在线贪心、DAG-oracle 贪心、lookahead reference
 ├── outputs/
-│   └── wpr_smoke_final_fix/
+│   ├── wpr_smoke_final_fix/
+│   └── wpr_paper_v1_loads/
 │       ├── episode_metrics.csv
 │       ├── summary_metrics.csv
 │       ├── training_curve.csv
@@ -21,6 +22,7 @@ WPRO/
 ├── plot_wpr_results.py     # 只读取 CSV 重新生成图
 ├── docs_wpr_a2c_experiments.md
 ├── WPR_IMPLEMENTATION_STATUS.md
+├── EXPERIMENT_RESULTS_V1.md
 ├── requirements.txt
 └── WPRO.pptx
 ```
@@ -46,6 +48,10 @@ WPRO/
 5. `run_wpr_experiments.py`
 
    审阅实验入口、随机种子、quick 模式、指标汇总和图生成逻辑。
+
+6. `EXPERIMENT_RESULTS_V1.md`
+
+   查看当前 light/moderate/heavy 三档负载的第一版论文实验结论。
 
 ## 运行方式
 
