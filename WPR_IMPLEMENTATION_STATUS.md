@@ -56,6 +56,13 @@
    L_exec = alpha_{m,g} * N_in + beta_{m,g} * N_out + semantic_work + jitter
    ```
 
+   实现上已拆分为：
+
+   - `expected_exec_time()`：确定性期望执行时间，用于 Actor action features、baselines、lookahead 和准入估计；
+   - `sample_exec_time()`：只在真实 `_schedule_llm()` 时使用。
+
+   为保证 baseline 公平性，workflow 生成时会预采样每个 `(stage, model, gpu)` 的 `exec_jitter` counterfactual table。不同算法在相同 seed 下共享同一组潜在服务时间，不会因为候选动作遍历次数不同而消耗不同随机数。
+
 6. ready_times 真实使用
 
    `ready_times` 由 arrival/source stage 和通信完成时间更新，用于：
@@ -105,7 +112,9 @@
 
 11. WAIT 与事件边界
 
-   per-GPU WAIT 已替换为全局 `WAIT_ALL=(-1,-1,-1,-1)`。如果选择 dispatch，decoder 会继续为当前 idle GPUs 构造 assignment set；只有决定本轮完全不调度时才推进到下一个外生事件。
+   per-GPU WAIT 已替换为全局 `WAIT_ALL=(-1,-1,-1,-1)`。如果选择 dispatch，decoder 会继续为当前 idle GPUs 构造 assignment set；只有决定本轮完全不调度时才推进到下一个外生事件。`WAIT_ALL` 使用全局 GPU 聚合特征，不再绑定第一张 idle GPU。
+
+   环境增加了零时间 no-op 保护：若 `dt=0` 且离散状态签名完全不变，将直接报错，避免依赖 step limit 掩盖事件边界错误。
 
 12. Actor/Critic 更新
 

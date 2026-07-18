@@ -26,7 +26,7 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 - `execution_class="llm"` 的 stage 由 orchestrator 选择 stage/model/GPU；
 - GPU 使用 `IDLE_RESIDENT -> PREPARING -> RUNNING -> IDLE_RESIDENT` 状态机；
 - successor ready time 包含 communication delay；
-- LLM 执行时间由 input tokens、actual output tokens、model、GPU 和随机扰动决定；
+- LLM 期望执行时间由 input tokens、actual output tokens、model 和 GPU 决定；真实执行时长从预采样 `exec_jitter(stage, model, gpu)` counterfactual table 中读取，保证不同算法在相同 seed 下共享公平随机 trace；
 - `ready_times` 真实参与 ready 判断和 `avg_ready_wait` 指标。
 
 ## WPR-A2C 模块
@@ -37,7 +37,7 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 
 2. DAG-induced Model-Demand Head
 
-   使用当前 state 学习 `oracle_dag_demand_target(H)`。当前实现更严谨地表述为 DAG-induced demand representation，而不是不可替代的真实未来预测器。
+   使用当前 state 学习 `oracle_dag_demand_target(H)`。当前实现更严谨地表述为 DAG-induced near-future model-demand estimation under uncertain stage durations，而不是 actual unknown future 的 perfect prediction。
 
 3. Residency-aware cross scorer
 

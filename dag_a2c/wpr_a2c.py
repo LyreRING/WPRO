@@ -238,24 +238,25 @@ class WPRA2CAgent:
         """构造 phi(S,a)：每个候选动作都有不同特征，actor 才能学习相对偏好。"""
 
         slot, stage_id, model_id, gpu_id = action
-        if gpu_id < 0:
-            gpu_id = env.idle_gpus()[0] if env.idle_gpus() else 0
         wf_dim = env.workflow_progress_features().shape[1]
         wf_feat = np.zeros(wf_dim, dtype=np.float32)
         stage_type_onehot = np.zeros(env.num_stage_types, dtype=np.float32)
         stage_scalar = np.zeros(5, dtype=np.float32)
         model_scalar = np.zeros(8, dtype=np.float32)
-        gpu = env.gpus[gpu_id]
-        gpu_scalar = np.asarray(
-            [
-                gpu.speed / max(g.speed for g in env.gpus),
-                gpu.memory / max(g.memory for g in env.gpus),
-                gpu.bandwidth / max(g.bandwidth for g in env.gpus),
-                float(env.resident_model[gpu_id] >= 0),
-            ],
-            dtype=np.float32,
-        )
-        cross = np.zeros(18, dtype=np.float32)
+        if slot < 0:
+            gpu_scalar = self.global_wait_gpu_features(env)
+        else:
+            gpu = env.gpus[gpu_id]
+            gpu_scalar = np.asarray(
+                [
+                    gpu.speed / max(g.speed for g in env.gpus),
+                    gpu.memory / max(g.memory for g in env.gpus),
+                    gpu.bandwidth / max(g.bandwidth for g in env.gpus),
+                    float(env.resident_model[gpu_id] >= 0),
+                ],
+                dtype=np.float32,
+            )
+        cross = np.zeros(19, dtype=np.float32)
         is_wait = float(slot < 0)
 
         if slot >= 0:
@@ -268,7 +269,7 @@ class WPRA2CAgent:
             remaining_cp = env.remaining_critical_path(wf)
             prep = env.prep_time(model_id, gpu_id)
             input_delay = env.input_transfer_delay(wf, stage_id, gpu_id)
-            exec_t = env.exec_time(slot, stage_id, model_id, gpu_id)
+            exec_t = env.expected_exec_time(slot, stage_id, model_id, gpu_id)
             current = int(env.resident_model[gpu_id])
             resident_hit = float(current == model_id)
             same_backbone = float(current >= 0 and env.models[current].backbone == model.backbone)
@@ -324,8 +325,9 @@ class WPRA2CAgent:
                 dtype=np.float32,
             )
         else:
-            current = int(env.resident_model[gpu_id])
-            current_demand = demand[current] if current >= 0 else 0.0
+            resident_demands = [float(demand[int(m)]) for m in env.resident_model if int(m) >= 0]
+            max_resident_demand = max(resident_demands, default=0.0)
+            mean_resident_demand = float(np.mean(resident_demands)) if resident_demands else 0.0
             next_arrival, next_completion = self.next_event_features(env)
             cross = np.asarray(
                 [
@@ -335,9 +337,9 @@ class WPRA2CAgent:
                     1.0,
                     1.0,
                     0.0,
-                    current_demand,
-                    -current_demand,
-                    -current_demand,
+                    mean_resident_demand,
+                    max_resident_demand,
+                    mean_resident_demand - max_resident_demand,
                     0.0,
                     0.0,
                     next_arrival,
@@ -353,6 +355,25 @@ class WPRA2CAgent:
             )
 
         return np.concatenate([wf_feat, stage_type_onehot, stage_scalar, model_scalar, gpu_scalar, cross]).astype(np.float32)
+
+    def global_wait_gpu_features(self, env: WPREnv) -> np.ndarray:
+        """Global GPU aggregation for WAIT_ALL rather than binding WAIT to one GPU."""
+
+        idle = env.idle_gpus()
+        gpus = [env.gpus[g] for g in idle] if idle else list(env.gpus)
+        max_speed = max(g.speed for g in env.gpus)
+        max_mem = max(g.memory for g in env.gpus)
+        max_bw = max(g.bandwidth for g in env.gpus)
+        resident_present = [float(env.resident_model[g.gpu_id] >= 0) for g in gpus]
+        return np.asarray(
+            [
+                float(np.mean([g.speed / max_speed for g in gpus])),
+                float(np.mean([g.memory / max_mem for g in gpus])),
+                float(np.mean([g.bandwidth / max_bw for g in gpus])),
+                float(np.mean(resident_present)) if resident_present else 0.0,
+            ],
+            dtype=np.float32,
+        )
 
     def residency_delta(self, env: WPREnv, demand: np.ndarray, action: tuple[int, int, int, int]) -> float:
         slot, stage_id, model_id, gpu_id = action
@@ -390,7 +411,7 @@ class WPRA2CAgent:
             for slot, sid, mid, gid in env.feasible_actions_for_gpu(g):
                 wf = env.active[slot]
                 slack = wf.arrival + wf.template.deadline - env.time
-                score = wf.template.weight / max(0.5, slack) - 0.20 * (env.input_transfer_delay(wf, sid, gid) + env.prep_time(mid, gid) + env.exec_time(slot, sid, mid, gid))
+                score = wf.template.weight / max(0.5, slack) - 0.20 * (env.input_transfer_delay(wf, sid, gid) + env.prep_time(mid, gid) + env.expected_exec_time(slot, sid, mid, gid))
                 best = max(best, float(score))
         return float(np.clip(best, -10.0, 10.0) / 10.0)
 

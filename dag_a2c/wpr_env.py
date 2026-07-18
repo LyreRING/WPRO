@@ -90,6 +90,7 @@ class WPRWorkflow:
     expected_output_tokens: np.ndarray
     actual_output_tokens: np.ndarray
     output_mb: np.ndarray
+    exec_jitter: np.ndarray
 
 
 def build_workflow_templates() -> tuple[WPRTemplate, ...]:
@@ -349,6 +350,7 @@ class WPREnv:
 
         self.step_count += 1
         before = self.time
+        signature_before = self.state_signature()
         potential_before = self.potential()
         used_pairs: set[tuple[int, int]] = set()
         used_gpus: set[int] = set()
@@ -374,6 +376,9 @@ class WPREnv:
             self._advance_to_next_external_event()
             self._advance_until_decision()
         self.last_dt = max(0.0, self.time - before)
+        signature_after = self.state_signature()
+        if self.last_dt <= 1e-12 and signature_after == signature_before:
+            raise RuntimeError("Zero-time transition without state change detected; event boundary is inconsistent.")
         terminal_reward = (
             self.completed_value
             - value_before
@@ -409,7 +414,12 @@ class WPREnv:
         return float(target.weight_size / gpu.bandwidth + 0.22)
 
     def exec_time(self, slot: int, stage_id: int, model_id: int, gpu_id: int) -> float:
-        """LLM stage 执行时间，体现 prefill/decode token 量与系统扰动。"""
+        """Backward-compatible deterministic expected execution time."""
+
+        return self.expected_exec_time(slot, stage_id, model_id, gpu_id)
+
+    def expected_exec_time(self, slot: int, stage_id: int, model_id: int, gpu_id: int) -> float:
+        """Deterministic expected LLM execution time for scoring and baselines."""
 
         wf = self.active[slot]
         stage = wf.template.stages[stage_id]
@@ -418,8 +428,14 @@ class WPREnv:
         prefill = model.prefill_time_per_ktok * (wf.input_tokens[stage_id] / 1000.0) / gpu.speed
         decode = model.decode_time_per_ktok * (wf.actual_output_tokens[stage_id] / 1000.0) / gpu.speed
         semantic_work = 0.18 * stage.work / gpu.speed
-        jitter = float(self.rng.lognormal(mean=0.0, sigma=0.08))
-        return float((prefill + decode + semantic_work) * jitter)
+        return float(prefill + decode + semantic_work)
+
+    def sample_exec_time(self, slot: int, stage_id: int, model_id: int, gpu_id: int) -> float:
+        """Actual execution time from the pre-sampled counterfactual trace table."""
+
+        expected = self.expected_exec_time(slot, stage_id, model_id, gpu_id)
+        jitter = float(self.active[slot].exec_jitter[stage_id, model_id, gpu_id])
+        return float(expected * jitter)
 
     def tool_time(self, wf: WPRWorkflow, stage_id: int) -> float:
         stage = wf.template.stages[stage_id]
@@ -482,6 +498,44 @@ class WPREnv:
             slack_ratio = float(np.clip(slack / max(wf.template.deadline, self.shaping_epsilon), 0.0, 1.0))
             total += wf.template.weight * alpha * slack_ratio
         return float(total)
+
+    def state_signature(self) -> tuple:
+        """Compact discrete signature used to guard against zero-time no-op loops."""
+
+        active_sig = tuple(
+            (
+                wf.workflow_id,
+                tuple(bool(x) for x in wf.completed),
+                tuple(bool(x) for x in wf.scheduled),
+                tuple(float(np.round(x, 6)) if np.isfinite(x) else "inf" for x in wf.ready_times),
+            )
+            for wf in self.active
+        )
+        running_sig = tuple(
+            sorted(
+                (
+                    int(x["workflow_id"]),
+                    int(x["stage_id"]),
+                    int(x["gpu_id"]),
+                    str(x["kind"]),
+                    float(np.round(float(x["finish"]), 6)),
+                    float(np.round(float(x.get("prep_done", 0.0)), 6)),
+                )
+                for x in self.running
+            )
+        )
+        return (
+            float(np.round(self.time, 6)),
+            len(self.pending),
+            active_sig,
+            running_sig,
+            tuple(int(x) for x in self.resident_model),
+            tuple(int(x) for x in self.target_model),
+            tuple(str(x) for x in self.gpu_state),
+            len(self.done_workflows),
+            len(self.rejected_workflows),
+            len(self.dropped_workflows),
+        )
 
     def observe(self) -> dict[str, np.ndarray]:
         prep_frac = float(np.mean(self.gpu_state == "PREPARING"))
@@ -643,7 +697,7 @@ class WPREnv:
         wf = self.active[slot]
         input_delay = self.input_transfer_delay(wf, stage_id, gpu_id)
         prep = self.prep_time(model_id, gpu_id)
-        exec_t = self.exec_time(slot, stage_id, model_id, gpu_id)
+        exec_t = self.sample_exec_time(slot, stage_id, model_id, gpu_id)
         prep_done = self.time + input_delay + prep
         finish = prep_done + exec_t
         wf.scheduled[stage_id] = True
@@ -914,6 +968,7 @@ class WPREnv:
             expected_out = np.asarray([max(16.0, st.output_tokens_mean * 1000.0) for st in template.stages], dtype=np.float32)
             actual_out = np.asarray([max(16.0, self.rng.lognormal(np.log(max(16.0, st.output_tokens_mean * 1000.0)), 0.25)) for st in template.stages], dtype=np.float32)
             output_mb = np.asarray([max(0.05, self.rng.lognormal(np.log(max(0.05, st.output_mb_mean)), 0.20)) for st in template.stages], dtype=np.float32)
+            exec_jitter = self.rng.lognormal(mean=0.0, sigma=0.08, size=(n, self.num_models, self.num_gpus)).astype(np.float32)
             arrivals.append(
                 WPRWorkflow(
                     wid,
@@ -931,6 +986,7 @@ class WPREnv:
                     expected_out,
                     actual_out,
                     output_mb,
+                    exec_jitter,
                 )
             )
             wid += 1

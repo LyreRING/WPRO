@@ -41,7 +41,7 @@ def edf_matching(env: WPREnv) -> list[tuple[int, int, int, int]]:
         for a in env.feasible_actions_for_gpu(g, used):
             slot, sid, mid, gid = a
             wf = env.active[slot]
-            finish = env.time + env.prep_time(mid, gid) + env.exec_time(slot, sid, mid, gid)
+            finish = env.time + env.prep_time(mid, gid) + env.expected_exec_time(slot, sid, mid, gid)
             key = (wf.arrival + wf.template.deadline, finish, env.prep_time(mid, gid))
             if best_key is None or key < best_key:
                 best_key = key
@@ -65,7 +65,7 @@ def online_ready_greedy(env: WPREnv) -> list[tuple[int, int, int, int]]:
             wf = env.active[slot]
             slack = wf.arrival + wf.template.deadline - env.time
             prep = env.prep_time(mid, gid)
-            duration = env.exec_time(slot, sid, mid, gid)
+            duration = env.expected_exec_time(slot, sid, mid, gid)
             resident_bonus = 1.0 if env.resident_model[gid] == mid else 0.0
             ready_wait = max(0.0, env.time - float(wf.ready_times[sid]))
             score = 2.2 * wf.template.weight / max(0.5, slack) + 0.7 * resident_bonus + 0.04 * ready_wait - 0.30 * prep - 0.22 * duration
@@ -93,7 +93,7 @@ def dag_oracle_residency_greedy(env: WPREnv) -> list[tuple[int, int, int, int]]:
             stage = wf.template.stages[sid]
             slack = wf.arrival + wf.template.deadline - env.time
             prep = env.prep_time(mid, gid)
-            duration = env.exec_time(slot, sid, mid, gid)
+            duration = env.expected_exec_time(slot, sid, mid, gid)
             resident_bonus = 1.0 if env.resident_model[gid] == mid else 0.0
             score = 2.0 * wf.template.weight / max(0.5, slack) + 1.4 * future[mid] + 0.8 * resident_bonus - 0.35 * prep - 0.22 * duration + 0.08 * stage.work
             if score > best_score:
@@ -127,7 +127,7 @@ def lookahead_search_upper_reference(seed: int, horizon: float = 18.0, arrival_r
                 slot, sid, mid, gid = a
                 wf = e.active[slot]
                 slack = wf.arrival + wf.template.deadline - e.time
-                score = wf.template.weight / max(0.5, slack) - 0.2 * e.prep_time(mid, gid) - 0.15 * e.exec_time(slot, sid, mid, gid)
+                score = wf.template.weight / max(0.5, slack) - 0.2 * e.prep_time(mid, gid) - 0.15 * e.expected_exec_time(slot, sid, mid, gid)
                 scored.append((score, a))
             gpu_actions = [a for _, a in sorted(scored, reverse=True)[:top_k]]
             if e.has_future_external_event():

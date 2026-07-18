@@ -33,7 +33,7 @@ WPRO/
 
 2. `dag_a2c/wpr_env.py`
 
-   审阅准入控制、工具阶段、GPU residency 状态机、通信时延、token-dependent execution 与 ready-time 维护。
+   审阅准入控制、工具阶段、GPU residency 状态机、通信时延、token-dependent execution、预采样公平 service-time trace 与 ready-time 维护。
 
 3. `dag_a2c/wpr_a2c.py`
 
