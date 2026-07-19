@@ -12,3 +12,15 @@ Thumbs.db
 data/public_traces/BurstGPT_1.csv
 data/public_traces/*README*.md
 data/public_traces/Azure*.md
+data/public_traces/BurstGPT_1_span60s_120.csv
+data/public_traces/BurstGPT_1_span120s_120.csv
+data/public_traces/BurstGPT_1_span240s_120.csv
+data/public_traces/BurstGPT_1_span480s_120.csv
+data/public_traces/BurstGPT_1_window*s_120.csv
+outputs/wpr_trace_burstgpt_checkpoint_probe/
+outputs/wpr_trace_burstgpt_dense120_cap30_80ep_stable/
+outputs/wpr_trace_burstgpt_span30_prior15_40ep/
+outputs/wpr_trace_burstgpt_span30_prior_probe/
+outputs/wpr_trace_burstgpt_span30_probe/
+outputs/wpr_trace_burstgpt_span60_probe/
+outputs/wpr_trace_tuning/

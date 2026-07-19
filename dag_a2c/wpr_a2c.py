@@ -12,6 +12,7 @@ update uses the correct softmax-linear gradient:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 
 import numpy as np
@@ -51,6 +52,14 @@ class WPRA2CConfig:
     allow_wait: bool = True
     use_potential_shaping: bool = True
     gae_lambda: float = 0.92
+    advantage_clip: float = 4.0
+    return_best_checkpoint: bool = True
+    checkpoint_metric: str = "weighted_completed_value"
+    structural_prior_strength: float = 1.5
+    progress_action_scale: float = 1.0
+    validation_interval: int = 0
+    validation_episodes: int = 1
+    validation_seed_offset: int = 900000
 
 
 class WorkflowProgressEncoder:
@@ -154,6 +163,56 @@ class WPRA2CAgent:
         self.action_dim = len(self.action_features(env, self.encode(env), np.zeros(env.num_models, dtype=np.float32), (WAIT_SLOT, WAIT_STAGE, WAIT_MODEL, 0)))
         self.actor_w = self.rng.normal(0.0, 0.025, size=self.action_dim).astype(np.float32)
         self.actor_b = 0.0
+        self.apply_structural_actor_prior(env)
+
+    def apply_structural_actor_prior(self, env: WPREnv) -> None:
+        """Initialize the actor with the problem-structured cross scorer prior.
+
+        这不是固定启发式策略；它只是 actor 的初始参数。后续 A2C 更新仍会根据
+        rollout advantage 改写这些权重。这样可以降低随机初始化在组合动作空间中的
+        探索成本，并让论文中的 residency-aware scorer 真正进入策略参数。
+        """
+
+        strength = float(self.config.structural_prior_strength)
+        if strength <= 0.0:
+            return
+        wf_dim = env.workflow_progress_features().shape[1]
+        stage_offset = wf_dim + env.num_stage_types
+        model_offset = stage_offset + 5
+        cross_offset = self.action_dim - 19
+        prior = np.zeros_like(self.actor_w)
+
+        # stage_scalar: work, quality requirement, slack ratio, remaining critical path, service weight.
+        prior[stage_offset + 0] -= 0.20
+        prior[stage_offset + 2] -= 0.18
+        prior[stage_offset + 3] += 0.28
+        prior[stage_offset + 4] += 0.55
+
+        # model_scalar: quality, prefill, decode, memory, weight size, adapter size, feasible, predicted demand.
+        prior[model_offset + 0] += 0.55
+        prior[model_offset + 1] -= 0.25
+        prior[model_offset + 2] -= 0.30
+        prior[model_offset + 3] -= 0.12
+        prior[model_offset + 4] -= 0.12
+        prior[model_offset + 5] -= 0.05
+        prior[model_offset + 6] += 0.35
+        prior[model_offset + 7] += 0.28
+
+        # cross features: prep, communication, execution, residency hit/backbone, demand and priority terms.
+        prior[cross_offset + 0] -= 0.50
+        prior[cross_offset + 1] -= 0.28
+        prior[cross_offset + 2] -= 0.55
+        prior[cross_offset + 3] += 0.80
+        prior[cross_offset + 4] += 0.22
+        prior[cross_offset + 5] += 0.30
+        prior[cross_offset + 6] -= 0.12
+        prior[cross_offset + 7] += 0.36
+        prior[cross_offset + 8] += 0.50
+        prior[cross_offset + 9] += 1.00
+        prior[cross_offset + 10] += 0.18
+        prior[cross_offset + 14] += 0.18
+        prior[cross_offset + 18] += 0.05
+        self.actor_w += strength * prior.astype(np.float32)
 
     def encode(self, env: WPREnv) -> np.ndarray:
         return self.encoder.encode(env, use_progress=self.config.use_progress_encoder)
@@ -268,7 +327,7 @@ class WPRA2CAgent:
             stage = wf.template.stages[stage_id]
             model = env.models[model_id]
             if self.config.use_progress_encoder:
-                wf_feat = env.workflow_progress_features()[slot]
+                wf_feat = env.workflow_progress_features()[slot] * self.config.progress_action_scale
             stage_type_onehot[stage.stage_type] = 1.0
             slack = wf.arrival + wf.template.deadline - env.time
             remaining_cp = env.remaining_critical_path(wf)
@@ -440,6 +499,7 @@ class WPRA2CAgent:
         if not records:
             return {"advantage": 0.0, "demand_loss": 0.0, "entropy": 0.0}
         state = records[0]["state"]
+        policy_advantage = float(np.clip(advantage, -self.config.advantage_clip, self.config.advantage_clip))
         entropies = []
         for rec in records:
             features = rec["features"]
@@ -453,7 +513,7 @@ class WPRA2CAgent:
             entropy_logit_grad = -probs * (np.log(np.maximum(probs, 1e-9)) + entropy)
             entropy_feature_grad = (entropy_logit_grad @ features) / max(self.config.temperature, 1e-6)
 
-            self.actor_w += self.config.actor_lr * (advantage * grad_logp + self.config.entropy_coef * entropy_feature_grad)
+            self.actor_w += self.config.actor_lr * (policy_advantage * grad_logp + self.config.entropy_coef * entropy_feature_grad)
             entropies.append(entropy)
 
         demand_loss = 0.0
@@ -514,6 +574,23 @@ def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig 
     probe.shaping_beta = cfg.beta_time_discount
     agent = WPRA2CAgent(probe, cfg)
     curve: list[dict[str, float]] = []
+    best_agent = copy.deepcopy(agent)
+    best_score = -float("inf")
+
+    def validation_score(candidate: WPRA2CAgent, ep: int) -> float:
+        scores = []
+        for vidx in range(max(1, cfg.validation_episodes)):
+            env = env_factory(seed + cfg.validation_seed_offset + 1000 * ep + vidx)
+            env.enable_potential_shaping = cfg.use_potential_shaping
+            env.shaping_beta = cfg.beta_time_discount
+            env.reset(seed + cfg.validation_seed_offset + 1000 * ep + vidx)
+            while not env.done:
+                assignments, _ = candidate.dispatch(env, deterministic=True)
+                env.step(assignments)
+            metrics = env.final_metrics()
+            scores.append(float(metrics.get(cfg.checkpoint_metric, metrics["weighted_completed_value"])))
+        return float(np.mean(scores))
+
     for ep in range(episodes):
         env = env_factory(seed + ep)
         env.enable_potential_shaping = cfg.use_potential_shaping
@@ -547,4 +624,10 @@ def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig 
                 "policy_entropy": stats["entropy"],
             }
         )
-    return agent, curve
+        metric_score = float(metrics.get(cfg.checkpoint_metric, metrics["weighted_completed_value"]))
+        if cfg.validation_interval > 0 and (ep + 1) % cfg.validation_interval == 0:
+            metric_score = validation_score(agent, ep)
+        if metric_score > best_score:
+            best_score = metric_score
+            best_agent = copy.deepcopy(agent)
+    return (best_agent if cfg.return_best_checkpoint else agent), curve

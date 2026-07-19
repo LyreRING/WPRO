@@ -62,6 +62,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--duration", type=float, default=None, help="Keep trace requests whose scaled arrival time is within this window.")
     p.add_argument("--deadline-mode", choices=["template", "relative", "elapsed"], default="relative")
     p.add_argument("--deadline-multiplier", type=float, default=2.5)
+    p.add_argument("--checkpoint-metric", choices=["weighted_completed_value", "weighted_goodput_rate", "sla_success_ratio"], default="weighted_goodput_rate")
+    p.add_argument("--validation-interval", type=int, default=5)
+    p.add_argument("--validation-episodes", type=int, default=1)
     p.add_argument("--timestamp-col", default=None)
     p.add_argument("--input-tokens-col", default=None)
     p.add_argument("--output-tokens-col", default=None)
@@ -270,6 +273,7 @@ def main() -> None:
             use_residency_features=False,
             use_wait_features=False,
             allow_wait=False,
+            structural_prior_strength=0.0,
         ),
         "wpr_no_progress": WPRA2CConfig(use_progress_encoder=False),
         "wpr_no_demand": WPRA2CConfig(use_demand_predictor=False),
@@ -277,6 +281,10 @@ def main() -> None:
         "wpr_no_shaping": WPRA2CConfig(use_potential_shaping=False),
         "wpr_a2c": WPRA2CConfig(actor_lr=0.003, critic_lr=0.008, entropy_coef=0.0005, allow_wait=False, use_wait_features=False),
     }
+    for cfg in agents_cfg.values():
+        cfg.checkpoint_metric = args.checkpoint_metric
+        cfg.validation_interval = args.validation_interval
+        cfg.validation_episodes = args.validation_episodes
 
     rows: list[dict] = []
     train_rows: list[dict] = []

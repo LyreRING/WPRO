@@ -21,7 +21,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--raw", type=Path, default=Path("data/public_traces/BurstGPT_1.csv"))
     p.add_argument("--output", type=Path, default=Path("data/public_traces/BurstGPT_1_dense_120.csv"))
     p.add_argument("--requests", type=int, default=120)
-    p.add_argument("--mode", choices=["dense", "prefix"], default="dense")
+    p.add_argument("--mode", choices=["dense", "prefix", "span"], default="dense")
+    p.add_argument("--target-span", type=float, default=30.0, help="For mode=span, select n consecutive requests whose timestamp span is closest to this value.")
     p.add_argument("--download", action="store_true")
     return p
 
@@ -52,19 +53,22 @@ def load_clean_rows(path: Path) -> list[tuple[float, dict[str, str]]]:
     return rows
 
 
-def select_rows(rows: list[tuple[float, dict[str, str]]], n: int, mode: str) -> list[dict[str, str]]:
+def select_rows(rows: list[tuple[float, dict[str, str]]], n: int, mode: str, target_span: float) -> list[dict[str, str]]:
     if mode == "prefix":
         return [row for _, row in rows[:n]]
     best_i = 0
-    best_span = float("inf")
+    best_span = rows[n - 1][0] - rows[0][0]
+    best_score = float("inf")
     for i in range(0, max(0, len(rows) - n)):
         span = rows[i + n - 1][0] - rows[i][0]
-        if span < best_span:
+        score = span if mode == "dense" else abs(span - target_span)
+        if score < best_score:
+            best_score = score
             best_span = span
             best_i = i
     selected = rows[best_i : best_i + n]
     print(
-        f"Selected dense window: n={n}, start={selected[0][0]:.3f}, "
+        f"Selected {mode} window: n={n}, start={selected[0][0]:.3f}, "
         f"end={selected[-1][0]:.3f}, span={best_span:.3f}s"
     )
     return [row for _, row in selected]
@@ -75,7 +79,7 @@ def main() -> None:
     if args.download:
         download_if_needed(args.raw)
     rows = load_clean_rows(args.raw)
-    selected = select_rows(rows, args.requests, args.mode)
+    selected = select_rows(rows, args.requests, args.mode, args.target_span)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fields = ["Timestamp", "Model", "Request tokens", "Response tokens", "Total tokens", "Log Type"]
     with args.output.open("w", newline="", encoding="utf-8") as f:
