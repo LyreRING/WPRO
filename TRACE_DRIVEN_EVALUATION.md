@@ -83,3 +83,23 @@ production-derived LLM request trace
 - Resident hit rate；
 - WAIT/admission behavior；
 - Ablation: Progress, Demand, Residency, Potential Shaping, Vanilla A2C。
+
+## 已接入的公开 trace
+
+当前仓库已经支持 BurstGPT：
+
+```powershell
+py prepare_public_trace.py --download --mode dense --requests 120 --output data\public_traces\BurstGPT_1_dense_120.csv
+```
+
+本地已完成一轮公开 trace-driven pilot：
+
+```text
+outputs/wpr_trace_burstgpt_dense120_cap30_80ep
+```
+
+结果摘要见：
+
+```text
+EXPERIMENT_RESULTS_PUBLIC_TRACE.md
+```

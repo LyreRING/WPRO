@@ -208,7 +208,10 @@ def draw_trace_characterization(path: Path, trace_path: Path) -> None:
         rows = list(csv.DictReader(f))
     if not rows:
         return
-    keys = {k.lower(): k for k in rows[0]}
+    def norm(name: str) -> str:
+        return name.strip().lower().replace(" ", "_").replace("-", "_")
+
+    keys = {norm(k): k for k in rows[0]}
     ts_key = keys.get("timestamp") or keys.get("time") or keys.get("arrival")
     in_key = keys.get("request_tokens") or keys.get("input_tokens") or keys.get("prompt_tokens")
     out_key = keys.get("response_tokens") or keys.get("output_tokens") or keys.get("completion_tokens")

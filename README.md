@@ -65,6 +65,29 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 py run_wpr_trace_experiments.py --trace-path data\sample_trace_requests.csv --quick --output outputs\wpr_trace_smoke
 ```
 
+公开真实数据集 BurstGPT：
+
+```powershell
+py prepare_public_trace.py --download --mode dense --requests 120 --output data\public_traces\BurstGPT_1_dense_120.csv
+
+py run_wpr_trace_experiments.py `
+  --trace-path data\public_traces\BurstGPT_1_dense_120.csv `
+  --timestamp-col Timestamp `
+  --input-tokens-col "Request tokens" `
+  --output-tokens-col "Response tokens" `
+  --model-col Model `
+  --deadline-mode relative `
+  --deadline-multiplier 4.5 `
+  --time-scale 1 `
+  --max-requests 120 `
+  --horizon 90 `
+  --max-active 30 `
+  --episodes 80 `
+  --eval-episodes 5 `
+  --seeds 2 `
+  --output outputs\wpr_trace_burstgpt_dense120_cap30_80ep
+```
+
 替换为真实 trace 后的推荐形式：
 
 ```powershell

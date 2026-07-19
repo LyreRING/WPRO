@@ -9,3 +9,6 @@ env/
 ~$*
 .DS_Store
 Thumbs.db
+data/public_traces/BurstGPT_1.csv
+data/public_traces/*README*.md
+data/public_traces/Azure*.md
