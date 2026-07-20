@@ -158,7 +158,7 @@ The strongest online baseline should typically be the best of EDF, online greedy
 
 ## 8. Figure Matrix
 
-Final figures should be generated from CSV results, not manually edited:
+Final figures should be generated from CSV results, not manually edited. The paper-ready format is vector PDF/SVG; PNG is only for preview.
 
 - grouped bar chart;
 - workload-response line chart;
@@ -174,7 +174,7 @@ Use:
 py generate_infocom_figures.py --input-dir outputs\infocom_trace_burstgpt_final
 ```
 
-The script emits PNG and PDF versions under `infocom_figures/`.
+The script emits PDF, SVG, and PNG versions under `paper_figures/`. Figures use publication-style serif fonts, dashed grid lines, error bars, hatches/markers for grayscale readability, math-formatted axis labels, and external legends when needed.
 
 ## 9. Current Result Status
 

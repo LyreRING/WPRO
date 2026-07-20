@@ -52,6 +52,14 @@ py run_wpr_experiments.py --quick --output outputs\wpr_smoke_final_fix
 py plot_wpr_results.py --input outputs\wpr_smoke_final_fix
 ```
 
+生成论文规范矢量图：
+
+```powershell
+py generate_infocom_figures.py --input-dir outputs\wpr_trace_burstgpt_span30_validation_probe --output-dir outputs\wpr_trace_burstgpt_span30_validation_probe\paper_figures
+```
+
+该脚本直接从 CSV 生成 `PDF/SVG/PNG`，其中 `PDF/SVG` 是论文使用的矢量图。
+
 建议论文主实验：
 
 ```powershell
