@@ -567,7 +567,13 @@ class WPRA2CAgent:
         return {key: float(np.mean(vals)) if vals else 0.0 for key, vals in out.items()}
 
 
-def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig | None = None) -> tuple[WPRA2CAgent, list[dict[str, float]]]:
+def train_wpr_agent(
+    env_factory,
+    episodes: int,
+    seed: int,
+    config: WPRA2CConfig | None = None,
+    validation_env_factory=None,
+) -> tuple[WPRA2CAgent, list[dict[str, float]]]:
     probe = env_factory(seed)
     cfg = config or WPRA2CConfig(seed=seed)
     probe.enable_potential_shaping = cfg.use_potential_shaping
@@ -576,11 +582,12 @@ def train_wpr_agent(env_factory, episodes: int, seed: int, config: WPRA2CConfig 
     curve: list[dict[str, float]] = []
     best_agent = copy.deepcopy(agent)
     best_score = -float("inf")
+    val_factory = validation_env_factory or env_factory
 
     def validation_score(candidate: WPRA2CAgent, ep: int) -> float:
         scores = []
         for vidx in range(max(1, cfg.validation_episodes)):
-            env = env_factory(seed + cfg.validation_seed_offset + 1000 * ep + vidx)
+            env = val_factory(seed + cfg.validation_seed_offset + 1000 * ep + vidx)
             env.enable_potential_shaping = cfg.use_potential_shaping
             env.shaping_beta = cfg.beta_time_discount
             env.reset(seed + cfg.validation_seed_offset + 1000 * ep + vidx)

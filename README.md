@@ -34,7 +34,8 @@ WPRO/
 3. `dag_a2c/wpr_a2c.py`：看 workflow-progress encoder、DAG-induced demand head、residency-aware action features、WAIT_ALL decoder、time-aware critic 和 GAE。
 4. `run_wpr_experiments.py`：看 controlled synthetic 实验、消融、训练、评估、CSV 和图生成。
 5. `run_wpr_trace_experiments.py`：看真实 trace timestamp/token 长度如何映射为 workflow 实例。
-6. `EXPERIMENT_RESULTS_V1.md`：看当前 light/moderate/heavy 三档负载的第一版结果。
+6. `INFOCOM_SIMULATION_PROTOCOL.md`：看最终 trace-driven 数据划分、训练、验证、测试和统计检验协议。
+7. `EXPERIMENT_RESULTS_V1.md`：看当前 light/moderate/heavy 三档负载的第一版结果。
 
 ## 安装
 
@@ -65,7 +66,7 @@ py run_wpr_experiments.py --episodes 200 --eval-episodes 20 --seeds 5 --output o
 py run_wpr_trace_experiments.py --trace-path data\sample_trace_requests.csv --quick --output outputs\wpr_trace_smoke
 ```
 
-公开真实数据集 BurstGPT：
+公开真实数据集 BurstGPT pilot：
 
 ```powershell
 py prepare_public_trace.py --download --mode span --requests 120 --target-span 30 --output data\public_traces\BurstGPT_1_span30s_120.csv
@@ -89,6 +90,43 @@ py run_wpr_trace_experiments.py `
   --validation-interval 5 `
   --validation-episodes 1 `
   --output outputs\wpr_trace_burstgpt_span30_validation_probe
+```
+
+注意：上面命令适合检查逻辑和画 preliminary 图，但 train/validation/test 仍然来自同一个 trace window。最终论文实验应先按时间切分 trace：
+
+```powershell
+py split_trace_dataset.py `
+  --input data\public_traces\BurstGPT_1.csv `
+  --output-dir data\public_traces\burstgpt_split `
+  --timestamp-col Timestamp `
+  --input-tokens-col "Request tokens" `
+  --output-tokens-col "Response tokens" `
+  --model-col Model `
+  --drop-zero-output `
+  --guard-seconds 30
+```
+
+然后使用隔离后的训练、验证、测试 split：
+
+```powershell
+py run_wpr_trace_experiments.py `
+  --train-trace-path data\public_traces\burstgpt_split\trace_train.csv `
+  --validation-trace-path data\public_traces\burstgpt_split\trace_validation.csv `
+  --test-trace-path data\public_traces\burstgpt_split\trace_test.csv `
+  --timestamp-col Timestamp `
+  --input-tokens-col "Request tokens" `
+  --output-tokens-col "Response tokens" `
+  --model-col Model `
+  --deadline-mode relative `
+  --deadline-multiplier 4.5 `
+  --time-scale 1 `
+  --episodes 200 `
+  --eval-episodes 20 `
+  --seeds 5 `
+  --checkpoint-metric weighted_completed_value `
+  --validation-interval 5 `
+  --validation-episodes 1 `
+  --output outputs\infocom_trace_burstgpt_final
 ```
 
 替换为真实 trace 后的推荐形式：

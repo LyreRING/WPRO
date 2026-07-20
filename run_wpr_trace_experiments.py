@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -48,7 +49,10 @@ POLICIES = [
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run trace-driven WPR-A2C experiments.")
-    p.add_argument("--trace-path", type=Path, required=True, help="CSV trace containing timestamps and token lengths.")
+    p.add_argument("--trace-path", type=Path, default=None, help="Backward-compatible single CSV trace. Use train/validation/test trace paths for final paper runs.")
+    p.add_argument("--train-trace-path", type=Path, default=None, help="Training split CSV trace.")
+    p.add_argument("--validation-trace-path", type=Path, default=None, help="Validation split CSV trace for checkpoint selection.")
+    p.add_argument("--test-trace-path", type=Path, default=None, help="Held-out test split CSV trace for final evaluation.")
     p.add_argument("--output", type=Path, default=None)
     p.add_argument("--episodes", type=int, default=120)
     p.add_argument("--eval-episodes", type=int, default=8)
@@ -74,9 +78,27 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-def make_source(args: argparse.Namespace) -> TraceWorkloadSource:
+def resolve_trace_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    train = args.train_trace_path or args.trace_path
+    validation = args.validation_trace_path or args.trace_path
+    test = args.test_trace_path or args.trace_path
+    missing = [
+        name
+        for name, value in (("train", train), ("validation", validation), ("test", test))
+        if value is None
+    ]
+    if missing:
+        raise ValueError(
+            "Missing trace path(s): "
+            + ", ".join(missing)
+            + ". Use --trace-path for smoke runs or --train-trace-path/--validation-trace-path/--test-trace-path for paper runs."
+        )
+    return Path(train), Path(validation), Path(test)
+
+
+def make_source(args: argparse.Namespace, trace_path: Path) -> TraceWorkloadSource:
     return TraceWorkloadSource(
-        path=args.trace_path,
+        path=trace_path,
         time_scale=args.time_scale,
         max_requests=args.max_requests,
         duration=args.duration,
@@ -90,26 +112,26 @@ def make_source(args: argparse.Namespace) -> TraceWorkloadSource:
     )
 
 
-def make_env(args: argparse.Namespace, seed: int) -> WPREnv:
+def make_env(args: argparse.Namespace, seed: int, trace_path: Path) -> WPREnv:
     return WPREnv(
         horizon=args.horizon,
         arrival_rate=args.arrival_rate,
         max_active=args.max_active,
         seed=seed,
-        workload_source=make_source(args),
+        workload_source=make_source(args, trace_path),
     )
 
 
-def eval_policy(args: argparse.Namespace, seed: int, policy_name: str, policy) -> dict[str, float | str | int]:
-    env = make_env(args, seed)
+def eval_policy(args: argparse.Namespace, seed: int, policy_name: str, policy, trace_path: Path) -> dict[str, float | str | int]:
+    env = make_env(args, seed, trace_path)
     env.reset(seed)
     while not env.done:
         env.step(policy(env))
     return {"scenario": "trace_driven", "policy": policy_name, "seed": seed, **env.final_metrics()}
 
 
-def eval_agent(args: argparse.Namespace, seed: int, agent, policy_name: str) -> dict[str, float | str | int]:
-    env = make_env(args, seed)
+def eval_agent(args: argparse.Namespace, seed: int, agent, policy_name: str, trace_path: Path) -> dict[str, float | str | int]:
+    env = make_env(args, seed, trace_path)
     env.reset(seed)
     while not env.done:
         assn, _ = agent.dispatch(env, deterministic=True)
@@ -248,6 +270,7 @@ def draw_trace_characterization(path: Path, trace_path: Path) -> None:
 
 def main() -> None:
     args = parser().parse_args()
+    train_trace_path, validation_trace_path, test_trace_path = resolve_trace_paths(args)
     if args.quick:
         args.episodes = 6
         args.eval_episodes = 2
@@ -258,6 +281,23 @@ def main() -> None:
         args.output = Path("outputs/wpr_trace_quick") if args.quick else Path("outputs/wpr_trace_full")
     out = args.output
     out.mkdir(parents=True, exist_ok=True)
+    with (out / "run_metadata.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "train_trace_path": str(train_trace_path),
+                "validation_trace_path": str(validation_trace_path),
+                "test_trace_path": str(test_trace_path),
+                "uses_isolated_trace_splits": len({str(train_trace_path), str(validation_trace_path), str(test_trace_path)}) == 3,
+                "checkpoint_metric": args.checkpoint_metric,
+                "validation_interval": args.validation_interval,
+                "validation_episodes": args.validation_episodes,
+                "episodes": args.episodes,
+                "eval_episodes": args.eval_episodes,
+                "seeds": args.seeds,
+            },
+            f,
+            indent=2,
+        )
 
     baselines = {
         "random": random_matching,
@@ -294,16 +334,22 @@ def main() -> None:
         agents = {}
         for name, cfg in agents_cfg.items():
             cfg.seed = train_seed + POLICY_SEED_OFFSET[name]
-            agent, curve = train_wpr_agent(lambda sd, a=args: make_env(a, sd), args.episodes, cfg.seed, cfg)
+            agent, curve = train_wpr_agent(
+                lambda sd, a=args, p=train_trace_path: make_env(a, sd, p),
+                args.episodes,
+                cfg.seed,
+                cfg,
+                validation_env_factory=lambda sd, a=args, p=validation_trace_path: make_env(a, sd, p),
+            )
             agents[name] = agent
             for r in curve:
                 train_rows.append({"scenario": "trace_driven", "policy": name, "train_seed": train_seed, **r})
         for ep in range(args.eval_episodes):
             eval_seed = args.base_seed + 50000 + 10000 * seed_idx + 100 * ep
             for pname, policy in baselines.items():
-                rows.append(eval_policy(args, eval_seed, pname, policy))
+                rows.append(eval_policy(args, eval_seed, pname, policy, test_trace_path))
             for pname, agent in agents.items():
-                rows.append(eval_agent(args, eval_seed, agent, pname))
+                rows.append(eval_agent(args, eval_seed, agent, pname, test_trace_path))
         summary = summarize(rows)
         write_csv(out / "episode_metrics.csv", rows)
         write_csv(out / "training_curve.csv", train_rows)
@@ -317,7 +363,7 @@ def main() -> None:
     draw_trace_bars(out / "figures" / "weighted_goodput_rate.png", summary, "weighted_goodput_rate", "Trace-driven weighted goodput rate")
     draw_trace_bars(out / "figures" / "sla_success_ratio.png", summary, "sla_success_ratio", "Trace-driven SLA success ratio")
     draw_trace_bars(out / "figures" / "p95_latency.png", summary, "p95_latency", "Trace-driven P95 latency")
-    draw_trace_characterization(out / "figures" / "trace_characterization.png", args.trace_path)
+    draw_trace_characterization(out / "figures" / "trace_characterization.png", test_trace_path)
     print(f"Wrote trace-driven WPR-A2C experiments to {out.resolve()}")
 
 

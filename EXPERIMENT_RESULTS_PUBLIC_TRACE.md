@@ -1,4 +1,6 @@
-# Public Trace-Driven Experiment Results
+# Public Trace-Driven Preliminary Results
+
+重要说明：本文件记录的是公开 BurstGPT trace 的 preliminary pilot。它用于检查代码逻辑、图形风格和趋势，不应直接作为最终 publication results。最终 INFOCOM 结果必须使用 `split_trace_dataset.py` 生成的 chronological train/validation/test split，并且测试只在 held-out test trace 上完成。完整协议见 `INFOCOM_SIMULATION_PROTOCOL.md`。
 
 ## Dataset
 
@@ -75,7 +77,7 @@ py run_wpr_trace_experiments.py `
 
 ## Interpretation
 
-这轮公开 trace-driven pilot 符合论文预期：
+这轮公开 trace-driven pilot 的趋势符合算法预期，但仍需在独立 test trace 上重跑：
 
 - WPR-A2C 的 `weighted_completed_value`、`weighted_goodput_rate` 和 `SLA success ratio` 三项均最高；
 - WPR-A2C 高于 online greedy，说明在 production-derived burst workload 下，结构化长期调度比纯 immediate greedy 更有价值；
@@ -83,4 +85,4 @@ py run_wpr_trace_experiments.py `
 - 去掉 demand、residency 或 potential shaping 后都有明显下降，支持模块消融论点；
 - `wpr_no_progress` 仍然强于传统 baselines，说明 action-specific stage/model/GPU 结构先验本身有效；full WPR-A2C 进一步结合 progress、demand 和 residency 获得最高收益。
 
-论文中建议把这组结果作为 `production-derived burst workload` 主图之一，并与 controlled synthetic 的 arrival-rate、deadline tightness、GPU heterogeneity、cold-load sensitivity 图配合使用。
+论文中可以把这组结果作为 `production-derived burst workload` 的 preliminary evidence。最终主图应使用隔离后的 held-out test trace 重新生成。
