@@ -22,9 +22,11 @@ from dag_a2c.wpr_a2c import WPRA2CConfig, train_wpr_agent
 from dag_a2c.wpr_baselines import (
     dag_oracle_residency_greedy,
     edf_matching,
+    fcfs_matching,
     lookahead_search_upper_reference,
     online_ready_greedy,
     random_matching,
+    srpt_matching,
 )
 from dag_a2c.wpr_env import WPREnv
 
@@ -45,6 +47,8 @@ SCENARIOS = (
 )
 
 POLICY_SEED_OFFSET = {
+    "fcfs": 3,
+    "srpt": 5,
     "vanilla_a2c": 11,
     "wpr_no_progress": 101,
     "wpr_no_demand": 211,
@@ -57,7 +61,9 @@ POLICY_SEED_OFFSET = {
 
 POLICIES = [
     "random",
+    "fcfs",
     "edf",
+    "srpt",
     "online_greedy",
     "dag_oracle_greedy",
     "vanilla_a2c",
@@ -162,7 +168,9 @@ def font(size=20, bold=False):
 def color(policy: str) -> str:
     return {
         "random": "#C94B45",
+        "fcfs": "#8F8F8F",
         "edf": "#8A7C2F",
+        "srpt": "#6E6E6E",
         "online_greedy": "#DA9A37",
         "dag_oracle_greedy": "#B47C2B",
         "vanilla_a2c": "#6D6F8C",
@@ -280,7 +288,9 @@ def main() -> None:
     train_rows: list[dict] = []
     baselines = {
         "random": random_matching,
+        "fcfs": fcfs_matching,
         "edf": edf_matching,
+        "srpt": srpt_matching,
         "online_greedy": online_ready_greedy,
         "dag_oracle_greedy": dag_oracle_residency_greedy,
     }

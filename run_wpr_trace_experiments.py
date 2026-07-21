@@ -26,8 +26,10 @@ from dag_a2c.wpr_a2c import WPRA2CConfig, train_wpr_agent
 from dag_a2c.wpr_baselines import (
     dag_oracle_residency_greedy,
     edf_matching,
+    fcfs_matching,
     online_ready_greedy,
     random_matching,
+    srpt_matching,
 )
 from dag_a2c.wpr_env import TraceWorkloadSource, WPREnv
 from run_wpr_experiments import POLICY_SEED_OFFSET, write_csv
@@ -35,7 +37,9 @@ from run_wpr_experiments import POLICY_SEED_OFFSET, write_csv
 
 POLICIES = [
     "random",
+    "fcfs",
     "edf",
+    "srpt",
     "online_greedy",
     "dag_oracle_greedy",
     "vanilla_a2c",
@@ -184,7 +188,9 @@ def _font(size=20, bold=False):
 def _color(policy: str) -> str:
     return {
         "random": "#C94B45",
+        "fcfs": "#8F8F8F",
         "edf": "#8A7C2F",
+        "srpt": "#6E6E6E",
         "online_greedy": "#DA9A37",
         "dag_oracle_greedy": "#B47C2B",
         "vanilla_a2c": "#6D6F8C",
@@ -301,7 +307,9 @@ def main() -> None:
 
     baselines = {
         "random": random_matching,
+        "fcfs": fcfs_matching,
         "edf": edf_matching,
+        "srpt": srpt_matching,
         "online_greedy": online_ready_greedy,
         "dag_oracle_greedy": dag_oracle_residency_greedy,
     }

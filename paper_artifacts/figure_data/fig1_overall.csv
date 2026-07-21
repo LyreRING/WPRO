@@ -1,0 +1,9 @@
+method,normalized_utility_mean,normalized_utility_ci,admission_ratio_mean,admission_ratio_ci,on_time_ratio_mean,on_time_ratio_ci
+FCFS,0.61,0.03,0.88,0.018,0.52,0.027
+EDF,0.7,0.027,0.84,0.02,0.65,0.025
+SRPT,0.66,0.029,0.86,0.018,0.59,0.027
+Utility-Greedy,0.81,0.023,0.8,0.02,0.73,0.022
+Lyapunov,0.78,0.024,0.82,0.018,0.7,0.024
+Vanilla A2C,0.76,0.031,0.79,0.026,0.68,0.03
+PPO,0.8,0.028,0.8,0.024,0.71,0.026
+WPRO,1.0,0.018,0.83,0.016,0.86,0.018

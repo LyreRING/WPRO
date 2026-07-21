@@ -1,0 +1,7 @@
+method,queue_waiting,model_preparation,communication,execution
+EDF,17.8,8.6,1.8,25.5
+Utility-Greedy,14.0,7.2,1.7,25.1
+Lyapunov,14.8,6.9,1.6,25.4
+Vanilla A2C,15.5,7.4,1.7,25.2
+PPO,14.6,7.0,1.6,25.3
+WPRO,10.5,4.8,1.4,25.8

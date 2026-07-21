@@ -30,6 +30,59 @@ def random_matching(env: WPREnv) -> list[tuple[int, int, int, int]]:
     return out
 
 
+def fcfs_matching(env: WPREnv) -> list[tuple[int, int, int, int]]:
+    """FCFS baseline: serve the earliest admitted ready workflow first.
+
+    The policy is fully online. It only uses the current ready set and chooses
+    the feasible model/GPU pair with the earliest local finish time for the
+    selected stage.
+    """
+
+    out = []
+    used = set()
+    for g in sorted(env.idle_gpus()):
+        best = None
+        best_key = None
+        for a in env.feasible_actions_for_gpu(g, used):
+            slot, sid, mid, gid = a
+            wf = env.active[slot]
+            finish = env.time + env.prep_time(mid, gid) + env.expected_exec_time(slot, sid, mid, gid)
+            ready_time = float(wf.ready_times[sid])
+            key = (wf.arrival, ready_time, finish, env.prep_time(mid, gid))
+            if best_key is None or key < best_key:
+                best_key = key
+                best = a
+        if best is not None:
+            out.append(best)
+            used.add((best[0], best[1]))
+    return out
+
+
+def srpt_matching(env: WPREnv) -> list[tuple[int, int, int, int]]:
+    """SRPT baseline: prioritize the ready workflow with least remaining work."""
+
+    out = []
+    used = set()
+    for g in sorted(env.idle_gpus()):
+        best = None
+        best_key = None
+        for a in env.feasible_actions_for_gpu(g, used):
+            slot, sid, mid, gid = a
+            wf = env.active[slot]
+            remaining = env.remaining_critical_path(wf)
+            duration = env.expected_exec_time(slot, sid, mid, gid)
+            prep = env.prep_time(mid, gid)
+            slack = wf.arrival + wf.template.deadline - env.time
+            key = (remaining, duration + prep, slack)
+            if best_key is None or key < best_key:
+                best_key = key
+                best = a
+        if best is not None:
+            out.append(best)
+            used.add((best[0], best[1]))
+    return out
+
+
 def edf_matching(env: WPREnv) -> list[tuple[int, int, int, int]]:
     """EDF：优先服务绝对 deadline 最早的 workflow，并选择完成时间最短的模型/GPU。"""
 

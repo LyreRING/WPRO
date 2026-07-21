@@ -1,0 +1,9 @@
+environment_id,environment_type,best_baseline_utility,wpro_utility,improvement_pct,num_workflows
+BurstGPT-low,Trace,0.77,0.84,9.090909090909085,520
+BurstGPT-mid,Trace,0.73,0.84,15.06849315068493,640
+BurstGPT-heavy,Trace,0.66,0.81,22.72727272727273,720
+Azure-like,Synthetic,0.71,0.82,15.492957746478872,600
+Tight-SLA,Synthetic,0.58,0.74,27.586206896551733,560
+High-load,Synthetic,0.61,0.79,29.50819672131148,820
+Cold-load,Synthetic,0.63,0.8,26.98412698412699,700
+Hetero-GPU,Synthetic,0.67,0.83,23.88059701492536,680

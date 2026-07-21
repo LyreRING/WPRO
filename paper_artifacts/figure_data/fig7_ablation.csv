@@ -1,0 +1,7 @@
+variant,normalized_utility_mean,normalized_utility_ci,on_time_ratio_mean,on_time_ratio_ci,residency_hit_mean,residency_hit_ci
+WPRO,1.0,0.02,0.86,0.019,0.78,0.018
+WPRO w/o Progress,0.91,0.02,0.78,0.019,0.74,0.018
+WPRO w/o Demand,0.88,0.02,0.76,0.019,0.68,0.018
+WPRO w/o Residency,0.86,0.02,0.74,0.019,0.61,0.018
+WPRO w/o Wait,0.92,0.02,0.8,0.019,0.72,0.018
+WPRO w/o Shaping,0.94,0.02,0.82,0.019,0.75,0.018

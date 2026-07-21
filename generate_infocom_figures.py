@@ -20,7 +20,9 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 POLICY_ORDER = [
     "random",
+    "fcfs",
     "edf",
+    "srpt",
     "online_greedy",
     "dag_oracle_greedy",
     "vanilla_a2c",
@@ -33,20 +35,24 @@ POLICY_ORDER = [
 
 POLICY_LABEL = {
     "random": "Random",
+    "fcfs": "FCFS",
     "edf": "EDF",
+    "srpt": "SRPT",
     "online_greedy": "Online Greedy",
     "dag_oracle_greedy": "DAG-Oracle Greedy",
     "vanilla_a2c": "Vanilla A2C",
-    "wpr_no_progress": "w/o Progress",
-    "wpr_no_demand": "w/o Demand",
-    "wpr_no_residency": "w/o Residency",
-    "wpr_no_shaping": "w/o Shaping",
-    "wpr_a2c": "WPR-A2C",
+    "wpr_no_progress": "WPRO w/o Progress",
+    "wpr_no_demand": "WPRO w/o Demand",
+    "wpr_no_residency": "WPRO w/o Residency",
+    "wpr_no_shaping": "WPRO w/o Shaping",
+    "wpr_a2c": "WPRO",
 }
 
 POLICY_COLOR = {
     "random": "#9e9e9e",
+    "fcfs": "#6f6f6f",
     "edf": "#7f7f7f",
+    "srpt": "#525252",
     "online_greedy": "#4c78a8",
     "dag_oracle_greedy": "#f58518",
     "vanilla_a2c": "#b279a2",
@@ -59,7 +65,9 @@ POLICY_COLOR = {
 
 POLICY_MARKER = {
     "random": "o",
+    "fcfs": "h",
     "edf": "s",
+    "srpt": "p",
     "online_greedy": "^",
     "dag_oracle_greedy": "D",
     "vanilla_a2c": "v",
@@ -72,7 +80,9 @@ POLICY_MARKER = {
 
 POLICY_HATCH = {
     "random": "",
+    "fcfs": "..",
     "edf": "//",
+    "srpt": "||",
     "online_greedy": "\\\\",
     "dag_oracle_greedy": "xx",
     "vanilla_a2c": "..",
@@ -316,7 +326,7 @@ def ablation_dot(summary: list[dict[str, str]], out: Path, formats: list[str], d
         ax.text(val + (1.5 if val >= 0 else -1.5), yi, f"{val:+.1f}%", va="center", ha="left" if val >= 0 else "right", fontsize=8)
     ax.set_yticks(y)
     ax.set_yticklabels([POLICY_LABEL[r["policy"]] for r in rows])
-    ax.set_xlabel(r"Goodput change vs. WPR-A2C (\%)")
+    ax.set_xlabel(r"Goodput change vs. WPRO (\%)")
     ax.grid(True, axis="x", linestyle="--", linewidth=0.6, color="0.82", dashes=(3, 2))
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

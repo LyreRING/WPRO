@@ -1,0 +1,11 @@
+gpu,start,end,stage_type,residency
+0,0.0,4.6,Planning,hit
+1,0.0,6.0,Retrieval,tool
+2,0.0,5.0,Reasoning,load
+0,4.8,11.2,Reasoning,hit
+2,5.2,9.5,Writing,load
+1,6.3,12.4,Verification,hit
+2,9.8,15.1,Writing,hit
+0,11.5,16.0,Repair,hit
+1,12.7,18.3,Reasoning,load
+2,15.4,20.0,Verification,hit
