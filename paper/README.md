@@ -3,12 +3,13 @@
 Main replanned file:
 
 ```text
-paper/wpro_infocom_replanned.tex
+paper/wpro_infocom_final.tex
 ```
 
-Earlier draft kept for comparison:
+Earlier drafts kept for comparison:
 
 ```text
+paper/wpro_infocom_replanned.tex
 paper/wpro_infocom_draft.tex
 ```
 
@@ -33,17 +34,17 @@ paper/Figures/fig_system_future_coupling.pdf
 PDF preview generated without a local LaTeX compiler:
 
 ```text
-paper/wpro_infocom_replanned_preview.pdf
+paper/wpro_infocom_final_preview.pdf
 ```
 
 Recommended build command from the repository root:
 
 ```powershell
 cd paper
-pdflatex wpro_infocom_replanned.tex
-bibtex wpro_infocom_replanned
-pdflatex wpro_infocom_replanned.tex
-pdflatex wpro_infocom_replanned.tex
+pdflatex wpro_infocom_final.tex
+bibtex wpro_infocom_final
+pdflatex wpro_infocom_final.tex
+pdflatex wpro_infocom_final.tex
 ```
 
 This local Windows environment currently does not expose `pdflatex`, `xelatex`, or `latexmk` in PATH, so the LaTeX source was syntax-checked for citation-key consistency but not locally rendered. A ReportLab PDF preview was generated for visual review. The TeX should compile on Overleaf or a TeX Live/MiKTeX installation with IEEEtran, algorithm, algpseudocode, and standard AMS packages.

@@ -29,7 +29,7 @@ from reportlab.platypus import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "paper" / "wpro_infocom_replanned_preview.pdf"
+OUT = ROOT / "paper" / "wpro_infocom_final_preview.pdf"
 
 
 def styles():
@@ -278,14 +278,19 @@ def build():
     para(story, sty["body"], "The simulator separates LLM, tool, and communication stages; models heterogeneous planning, reasoning, generation, retrieval, and verification capabilities; and uses chronological train/validation/test trace splits. Baselines include FCFS, EDF, SRPT, Utility-Greedy, Lyapunov, DAG-Oracle Greedy, Vanilla A2C, PPO, and runtime-inspired policies.")
     para(story, sty["body"], "The final INFOCOM protocol should use five independent RL training seeds, validation checkpoint selection, at least twenty paired held-out test windows, bootstrap 95% confidence intervals, and Wilcoxon signed-rank tests against the strongest online baseline.")
     para(story, sty["body"], "The main metrics are weighted completed value V_w, weighted goodput rate G_w, admission ratio R_adm, on-time ratio R_on, conditional SLA success, P95 latency, residency hit ratio, full-load count, queue waiting, communication overhead, and decision overhead.")
-    fig(story, sty, "paper_artifacts/figures/fig1_overall_performance.png", "Fig. 2. Overall performance. WPRO improves weighted utility and on-time completion.")
-    fig(story, sty, "paper_artifacts/figures/fig2_scalability_vs_arrival_rate.png", "Fig. 3. Scalability under increasing arrival rate.")
-    fig(story, sty, "paper_artifacts/figures/fig3_multi_environment_improvement.png", "Fig. 4. Multi-environment improvement over the strongest baseline.")
-    fig(story, sty, "paper_artifacts/figures/fig4_deadline_complexity_surface.png", "Fig. 5. Utility gain under deadline tightness and DAG complexity.")
-    fig(story, sty, "paper_artifacts/figures/fig5_latency_breakdown.png", "Fig. 6. Latency breakdown into queue waiting, preparation, communication, and execution.")
-    fig(story, sty, "paper_artifacts/figures/fig6_demand_prediction_and_residency.png", "Fig. 7. Demand estimation and residency hit mechanism.")
-    fig(story, sty, "paper_artifacts/figures/fig7_ablation_study.png", "Fig. 8. Ablation study.")
-    fig(story, sty, "paper_artifacts/figures/fig8_schedule_timeline_and_overhead.png", "Fig. 9. Scheduling behavior and decision overhead.")
+    fig(story, sty, "paper/Figures/split/fig_overall_utility.png", "Fig. 2(a). Weighted utility.")
+    fig(story, sty, "paper/Figures/split/fig_overall_admission.png", "Fig. 2(b). Admission ratio.")
+    fig(story, sty, "paper/Figures/split/fig_overall_ontime.png", "Fig. 2(c). On-time completion.")
+    fig(story, sty, "paper/Figures/split/fig_scale_utility.png", "Fig. 3(a). Utility under increasing arrival rate.")
+    fig(story, sty, "paper/Figures/split/fig_scale_ontime.png", "Fig. 3(b). On-time ratio under increasing arrival rate.")
+    fig(story, sty, "paper/Figures/split/fig_robustness_scatter.png", "Fig. 4. Multi-environment improvement over the strongest baseline.")
+    fig(story, sty, "paper/Figures/split/fig_latency_breakdown_split.png", "Fig. 5. Latency breakdown.")
+    fig(story, sty, "paper/Figures/split/fig_mech_prediction.png", "Fig. 6(a). DAG-induced demand estimation.")
+    fig(story, sty, "paper/Figures/split/fig_mech_residency.png", "Fig. 6(b). Residency hit ratio.")
+    fig(story, sty, "paper/Figures/split/fig_ablation_utility.png", "Fig. 7(a). Ablation on utility.")
+    fig(story, sty, "paper/Figures/split/fig_ablation_ontime.png", "Fig. 7(b). Ablation on deadline satisfaction.")
+    fig(story, sty, "paper/Figures/split/fig_behavior_timeline.png", "Fig. 8(a). Event timeline.")
+    fig(story, sty, "paper/Figures/split/fig_behavior_overhead.png", "Fig. 8(b). Decision overhead.")
     para(story, sty["body"], "Overall results should be interpreted through the service objective rather than a single utilization metric. WPRO may not maximize admission ratio in all settings, because admitting too many workflows can reduce on-time completion. Its advantage is stronger weighted SLA-compliant goodput.")
     para(story, sty["body"], "The scalability experiment tests the core future-aware claim. Under light load, many policies have enough slack to recover from bad residency choices. Under heavy load, cold-load mistakes accumulate, and WPRO's demand and residency modules become more valuable.")
     para(story, sty["body"], "The ablation study links performance to algorithmic structure. Removing future demand weakens anticipation of downstream model pressure; removing residency features weakens model-retention decisions; removing WAIT prevents the policy from preserving valuable resident models.")
